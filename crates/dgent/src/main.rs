@@ -44,6 +44,8 @@ fn main() -> Result<()> {
         })
         .context("open pty")?;
     let mut command = CommandBuilder::new(shell);
+    // Our screen is an xterm-style emulator; say so rather than inheriting the outer TERM.
+    command.env("TERM", "xterm-256color");
     command.cwd(std::env::current_dir().context("resolve launch directory")?);
     let mut child = pty.slave.spawn_command(command).context("spawn shell")?;
     drop(pty.slave);
@@ -86,7 +88,8 @@ fn main() -> Result<()> {
             match out_rx.try_recv() {
                 Ok(bytes) => parser.process(&bytes),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(0),
+                // PTY EOF: every holder of the slave is gone, so the shell has exited.
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(child.wait()?.exit_code()),
             }
         }
         if let Some(rx) = &turn {
@@ -213,7 +216,10 @@ fn main() -> Result<()> {
     let _ = child.kill();
     match result? {
         0 => Ok(()),
-        code => std::process::exit(code as i32),
+        code => {
+            drop(term); // restores the cursor; process::exit skips destructors
+            std::process::exit(code as i32)
+        }
     }
 }
 

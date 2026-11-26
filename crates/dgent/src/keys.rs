@@ -5,9 +5,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let mut out = if alt { vec![0x1b] } else { vec![] };
+    // xterm modifier parameter: 1 + shift + 2*alt + 4*ctrl.
+    let m = 1 + key.modifiers.contains(KeyModifiers::SHIFT) as u8 + 2 * alt as u8 + 4 * ctrl as u8;
     let csi = |c: char| {
-        if app_cursor {
+        if m > 1 {
+            format!("\x1b[1;{m}{c}")
+        } else if app_cursor {
             format!("\x1bO{c}")
         } else {
             format!("\x1b[{c}")
@@ -60,6 +63,12 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
         .into(),
         _ => String::new(),
     };
+    // Alt is an ESC prefix, except where it is already encoded in a modified cursor key.
+    let mut out = if alt && !s.starts_with("\x1b[1;") {
+        vec![0x1b]
+    } else {
+        vec![]
+    };
     out.extend_from_slice(s.as_bytes());
     out
 }
@@ -94,6 +103,14 @@ mod tests {
                 [b]
             );
         }
+        assert_eq!(
+            encode(k(KeyCode::Right, KeyModifiers::CONTROL), false),
+            b"\x1b[1;5C"
+        );
+        assert_eq!(
+            encode(k(KeyCode::Left, KeyModifiers::ALT), true),
+            b"\x1b[1;3D"
+        );
         assert_eq!(encode(k(KeyCode::Enter, KeyModifiers::NONE), false), b"\r");
         assert_eq!(encode(k(KeyCode::Up, KeyModifiers::NONE), false), b"\x1b[A");
         assert_eq!(encode(k(KeyCode::Up, KeyModifiers::NONE), true), b"\x1bOA");

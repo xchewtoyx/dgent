@@ -62,6 +62,7 @@ Each item touches its own module or crate, builds against the existing `Backend`
 
 **W1. Pane and command capture** (`crates/dgent/src/pane.rs`)
 Move PTY + parser into a `Pane` with scrollback and `fn run(&mut self, cmd) -> Capture { output, exit: Option<i32> }`, which types the command, then collects output until W2's end-of-command signal or a quiescence timeout.
+Also: PTY writes must not block the UI loop (a large paste into a command that isn't reading input fills the PTY queue). Move writes to a writer thread with a bounded queue that a quit can bypass. vt100 truncates rows/columns on shrink; push dropped rows into scrollback or accept and document it.
 Done: a test runs `/bin/sh` in a `Pane`, runs `echo hi; false`, and gets the output and (with W2 markers present) exit 1; `main.rs` uses `Pane`.
 
 **W2. Command boundaries and failure detection** (`crates/dgent/src/observe.rs`)
