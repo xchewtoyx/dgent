@@ -19,9 +19,12 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
             match b {
                 b'a'..=b'z' => (b - b'a' + 1) as char,
                 b' ' | b'@' => '\0',
-                b'[' => '\x1b',
-                b'\\' => '\x1c',
-                b']' => '\x1d',
+                b'[' | b'3' => '\x1b',
+                // crossterm reports raw 0x1c..=0x1f as Ctrl-4..=Ctrl-7.
+                b'\\' | b'4' => '\x1c',
+                b']' | b'5' => '\x1d',
+                b'^' | b'6' => '\x1e',
+                b'_' | b'/' | b'7' => '\x1f',
                 _ => c,
             }
             .to_string()
@@ -79,6 +82,18 @@ mod tests {
             encode(k(KeyCode::Char('x'), KeyModifiers::ALT), false),
             b"\x1bx"
         );
+        for (c, b) in [
+            ('^', 0x1e),
+            ('6', 0x1e),
+            ('_', 0x1f),
+            ('7', 0x1f),
+            ('4', 0x1c),
+        ] {
+            assert_eq!(
+                encode(k(KeyCode::Char(c), KeyModifiers::CONTROL), false),
+                [b]
+            );
+        }
         assert_eq!(encode(k(KeyCode::Enter, KeyModifiers::NONE), false), b"\r");
         assert_eq!(encode(k(KeyCode::Up, KeyModifiers::NONE), false), b"\x1b[A");
         assert_eq!(encode(k(KeyCode::Up, KeyModifiers::NONE), true), b"\x1bOA");

@@ -125,7 +125,7 @@ fn main() -> Result<()> {
                     .borders(Borders::TOP)
                     .title(format!(" {} ", backend.name()));
                 f.render_widget(
-                    Paragraph::new(panel.as_str())
+                    Paragraph::new(tail(&panel, PANEL_HEIGHT as usize - 1))
                         .wrap(Wrap { trim: false })
                         .block(block),
                     side,
