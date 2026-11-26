@@ -16,6 +16,21 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
             format!("\x1b[{c}")
         }
     };
+    // `ESC[n~` keys carry modifiers as `ESC[n;m~`; F1-F4 (`ESC O P`) as `ESC[1;mP`.
+    let tilde = |n: u8| {
+        if m > 1 {
+            format!("\x1b[{n};{m}~")
+        } else {
+            format!("\x1b[{n}~")
+        }
+    };
+    let ss3 = |c: char| {
+        if m > 1 {
+            format!("\x1b[1;{m}{c}")
+        } else {
+            format!("\x1bO{c}")
+        }
+    };
     let s: String = match key.code {
         KeyCode::Char(c) if ctrl => {
             let b = c.to_ascii_lowercase() as u8;
@@ -47,27 +62,16 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
         KeyCode::End if m == 1 => "\x1b[4~".into(),
         KeyCode::Home => csi('H'),
         KeyCode::End => csi('F'),
-        KeyCode::Insert => "\x1b[2~".into(),
-        KeyCode::Delete => "\x1b[3~".into(),
-        KeyCode::PageUp => "\x1b[5~".into(),
-        KeyCode::PageDown => "\x1b[6~".into(),
-        KeyCode::F(n @ 1..=4) => format!("\x1bO{}", (b'P' + n - 1) as char),
-        KeyCode::F(n) => match n {
-            5 => "\x1b[15~",
-            6 => "\x1b[17~",
-            7 => "\x1b[18~",
-            8 => "\x1b[19~",
-            9 => "\x1b[20~",
-            10 => "\x1b[21~",
-            11 => "\x1b[23~",
-            12 => "\x1b[24~",
-            _ => "",
-        }
-        .into(),
+        KeyCode::Insert => tilde(2),
+        KeyCode::Delete => tilde(3),
+        KeyCode::PageUp => tilde(5),
+        KeyCode::PageDown => tilde(6),
+        KeyCode::F(n @ 1..=4) => ss3((b'P' + n - 1) as char),
+        KeyCode::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5]),
         _ => String::new(),
     };
-    // Alt is an ESC prefix, except where it is already encoded in a modified cursor key.
-    let mut out = if alt && !s.starts_with("\x1b[1;") {
+    // Alt is an ESC prefix, except where the sequence already carries the modifier.
+    let mut out = if alt && !(s.starts_with("\x1b[") && s.contains(';')) {
         vec![0x1b]
     } else {
         vec![]
@@ -113,6 +117,22 @@ mod tests {
         assert_eq!(
             encode(k(KeyCode::Left, KeyModifiers::ALT), true),
             b"\x1b[1;3D"
+        );
+        assert_eq!(
+            encode(k(KeyCode::Delete, KeyModifiers::CONTROL), false),
+            b"\x1b[3;5~"
+        );
+        assert_eq!(
+            encode(k(KeyCode::F(1), KeyModifiers::SHIFT), false),
+            b"\x1b[1;2P"
+        );
+        assert_eq!(
+            encode(k(KeyCode::F(5), KeyModifiers::ALT), false),
+            b"\x1b[15;3~"
+        );
+        assert_eq!(
+            encode(k(KeyCode::F(5), KeyModifiers::NONE), false),
+            b"\x1b[15~"
         );
         assert_eq!(encode(k(KeyCode::Enter, KeyModifiers::NONE), false), b"\r");
         assert_eq!(encode(k(KeyCode::Up, KeyModifiers::NONE), false), b"\x1b[A");
