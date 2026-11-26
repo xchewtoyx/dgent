@@ -44,8 +44,9 @@ fn main() -> Result<()> {
         })
         .context("open pty")?;
     let mut command = CommandBuilder::new(shell);
-    // Our screen is an xterm-style emulator; say so rather than inheriting the outer TERM.
-    command.env("TERM", "xterm-256color");
+    // Match what vt100 can render rather than inheriting the outer TERM. Not xterm-256color:
+    // it advertises `rep` (CSI b), which vt100 ignores. screen-256color is also on every remote host.
+    command.env("TERM", "screen-256color");
     command.cwd(std::env::current_dir().context("resolve launch directory")?);
     let mut child = pty.slave.spawn_command(command).context("spawn shell")?;
     drop(pty.slave);

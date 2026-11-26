@@ -42,6 +42,9 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
         KeyCode::Down => csi('B'),
         KeyCode::Right => csi('C'),
         KeyCode::Left => csi('D'),
+        // screen terminfo: khome=\E[1~, kend=\E[4~ (modified forms stay xterm-style).
+        KeyCode::Home if m == 1 => "\x1b[1~".into(),
+        KeyCode::End if m == 1 => "\x1b[4~".into(),
         KeyCode::Home => csi('H'),
         KeyCode::End => csi('F'),
         KeyCode::Insert => "\x1b[2~".into(),
