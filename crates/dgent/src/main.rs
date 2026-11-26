@@ -18,7 +18,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
 /// How many screen lines go to the backend with a question.
@@ -43,15 +43,14 @@ fn main() -> Result<()> {
             pixel_height: 0,
         })
         .context("open pty")?;
-    let mut child = pty
-        .slave
-        .spawn_command(CommandBuilder::new(shell))
-        .context("spawn shell")?;
+    let mut command = CommandBuilder::new(shell);
+    command.cwd(std::env::current_dir().context("resolve launch directory")?);
+    let mut child = pty.slave.spawn_command(command).context("spawn shell")?;
     drop(pty.slave);
     let mut writer = pty.master.take_writer()?;
     let mut reader = pty.master.try_clone_reader()?;
 
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(64);
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         while let Ok(n @ 1..) = reader.read(&mut buf) {
@@ -77,13 +76,17 @@ fn main() -> Result<()> {
     let mut term =
         ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
 
-    let result: Result<()> = (|| loop {
-        // Drain shell output; EOF on the reader thread closes the channel.
-        loop {
+    // Ok(code): the exit code dgent should return (0 on prefix-quit, the shell's otherwise).
+    let result: Result<u32> = (|| loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.exit_code());
+        }
+        // Drain shell output, bounded so a flood (e.g. `yes`) can't starve key handling.
+        for _ in 0..64 {
             match out_rx.try_recv() {
                 Ok(bytes) => parser.process(&bytes),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(0),
             }
         }
         if let Some(rx) = &turn {
@@ -100,13 +103,20 @@ fn main() -> Result<()> {
         }
 
         let area: Rect = term.size()?.into();
-        let panel_h = if panel.is_empty() { 0 } else { PANEL_HEIGHT };
-        let [pane, side, status] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(panel_h),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [pane, status] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        // The panel overlays the bottom of the pane rather than shrinking it: vt100 drops
+        // rows on a height decrease, so resizing for the panel would erase shell output.
+        let panel_h = if panel.is_empty() {
+            0
+        } else {
+            PANEL_HEIGHT.min(pane.height)
+        };
+        let side = Rect {
+            y: pane.bottom() - panel_h,
+            height: panel_h,
+            ..pane
+        };
         if (pane.height, pane.width) != pane_size {
             pane_size = (pane.height, pane.width);
             parser.screen_mut().set_size(pane.height, pane.width);
@@ -124,6 +134,7 @@ fn main() -> Result<()> {
                 let block = Block::default()
                     .borders(Borders::TOP)
                     .title(format!(" {} ", backend.name()));
+                f.render_widget(Clear, side);
                 f.render_widget(
                     Paragraph::new(tail(&panel, PANEL_HEIGHT as usize - 1))
                         .wrap(Wrap { trim: false })
@@ -158,7 +169,7 @@ fn main() -> Result<()> {
                         Mode::Normal
                     }
                     Mode::Prefix => match key.code {
-                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('q') => return Ok(0),
                         KeyCode::Char('a') => Mode::Ask(String::new()),
                         KeyCode::Char('c') => {
                             panel.clear();
@@ -200,7 +211,10 @@ fn main() -> Result<()> {
     )?;
     terminal::disable_raw_mode()?;
     let _ = child.kill();
-    result
+    match result? {
+        0 => Ok(()),
+        code => std::process::exit(code as i32),
+    }
 }
 
 /// Line editing for the ask prompt. Calls `submit` on Enter.
