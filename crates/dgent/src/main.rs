@@ -88,8 +88,9 @@ fn main() -> Result<()> {
             match out_rx.try_recv() {
                 Ok(bytes) => parser.process(&bytes),
                 Err(mpsc::TryRecvError::Empty) => break,
-                // PTY EOF: every holder of the slave is gone, so the shell has exited.
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(child.wait()?.exit_code()),
+                // PTY EOF doesn't mean the shell exited (`exec cmd >/dev/null ...`): keep the UI
+                // live and let try_wait above report the exit.
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
         if let Some(rx) = &turn {
@@ -167,8 +168,10 @@ fn main() -> Result<()> {
                 mode = match std::mem::replace(&mut mode, Mode::Normal) {
                     Mode::Normal if prefix => Mode::Prefix,
                     Mode::Normal => {
-                        writer
-                            .write_all(&keys::encode(key, parser.screen().application_cursor()))?;
+                        pty_write(
+                            &mut writer,
+                            &keys::encode(key, parser.screen().application_cursor()),
+                        );
                         Mode::Normal
                     }
                     Mode::Prefix => match key.code {
@@ -179,7 +182,7 @@ fn main() -> Result<()> {
                             Mode::Normal
                         }
                         _ if prefix => {
-                            writer.write_all(b"\x1d")?;
+                            pty_write(&mut writer, b"\x1d");
                             Mode::Normal
                         }
                         _ => Mode::Normal,
@@ -198,9 +201,9 @@ fn main() -> Result<()> {
                 if let Mode::Ask(q) = &mut mode {
                     q.push_str(&text);
                 } else if parser.screen().bracketed_paste() {
-                    writer.write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes())?;
+                    pty_write(&mut writer, format!("\x1b[200~{text}\x1b[201~").as_bytes());
                 } else {
-                    writer.write_all(text.as_bytes())?;
+                    pty_write(&mut writer, text.as_bytes());
                 }
             }
             _ => {}
@@ -221,6 +224,12 @@ fn main() -> Result<()> {
             std::process::exit(code as i32)
         }
     }
+}
+
+/// Write to the shell. Errors are dropped: once the PTY closes nothing reads input,
+/// and shell exit is detected via `try_wait`, not write failures.
+fn pty_write(w: &mut impl Write, bytes: &[u8]) {
+    let _ = w.write_all(bytes);
 }
 
 /// Line editing for the ask prompt. Calls `submit` on Enter.
