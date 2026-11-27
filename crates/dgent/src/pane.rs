@@ -28,8 +28,10 @@ pub struct Pane {
     in_tx: Sender<Vec<u8>>,
     /// Raw output since `run` typed its command, while a capture is active.
     capture: Option<Vec<u8>>,
-    /// Whether the shell has emitted an OSC 133;D mark, so `run` can wait for one.
-    marks: bool,
+    /// Newlines printed since the last OSC 133;D mark (MAX if none yet). Zero means the
+    /// prompt we're at came straight after a mark, so the current shell (local or remote)
+    /// emits marks and `run` can wait for one.
+    lines_since_mark: usize,
 }
 
 /// What a command printed, and its exit code when the shell emits OSC 133 marks.
@@ -84,7 +86,7 @@ impl Pane {
             out_rx,
             in_tx,
             capture: None,
-            marks: false,
+            lines_since_mark: usize::MAX,
         })
     }
 
@@ -106,7 +108,11 @@ impl Pane {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
                     // shortcut: misses a mark split across reads; the next prompt catches it.
-                    self.marks |= find(&bytes, b"\x1b]133;D").is_some();
+                    let newlines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
+                    self.lines_since_mark = match rfind(&bytes, b"\x1b]133;D") {
+                        Some(d) => newlines(&bytes[d..]),
+                        None => self.lines_since_mark.saturating_add(newlines(&bytes)),
+                    };
                     if let Some(c) = &mut self.capture {
                         c.extend_from_slice(&bytes);
                     }
@@ -147,12 +153,15 @@ impl Pane {
     }
 
     /// Type `cmd` and collect its output until the shell's OSC 133;D end-of-command mark, or,
-    /// for a shell that has never sent one, until output goes quiet (then `exit` is None).
+    /// when the current prompt came without one, until output goes quiet (then `exit` is None).
     /// Capped at `MAX_RUN`. Blocks the caller.
     #[allow(dead_code)] // called by approved agent commands once W7 lands
     pub fn run(&mut self, cmd: &str) -> Capture {
         // Let the previous prompt (and its own D mark) arrive before capturing.
         self.wait_quiet(Duration::from_millis(100), Duration::from_secs(2));
+        // A shell without marks (e.g. after `ssh` to an unmarked host), or a multi-line prompt,
+        // falls back to the quiet timeout.
+        let marked = self.lines_since_mark == 0;
         self.capture = Some(Vec::new());
         self.write(format!("{cmd}\r").as_bytes());
         let start = Instant::now();
@@ -168,7 +177,7 @@ impl Pane {
                 self.capture = None;
                 return c;
             }
-            if (!self.marks && last.elapsed() > QUIET) || start.elapsed() > MAX_RUN {
+            if (!marked && last.elapsed() > QUIET) || start.elapsed() > MAX_RUN {
                 let buf = self.capture.take().unwrap_or_default();
                 return parse_capture(&buf, false).expect("unfinished capture always parses");
             }
@@ -199,6 +208,10 @@ fn size(rows: u16, cols: u16) -> PtySize {
 
 fn find(h: &[u8], n: &[u8]) -> Option<usize> {
     h.windows(n.len()).position(|w| w == n)
+}
+
+fn rfind(h: &[u8], n: &[u8]) -> Option<usize> {
+    h.windows(n.len()).rposition(|w| w == n)
 }
 
 /// Index just past the OSC terminator (BEL or ESC \) at or after `from`, which must be
@@ -308,6 +321,12 @@ mod tests {
         // With marks, a silent pause longer than QUIET doesn't end the capture.
         let c = p.run("sleep 1.5; echo done");
         assert_eq!((c.output.trim(), c.exit), ("done", Some(0)));
+        // An inner shell without marks (like ssh to an unmarked host) falls back to quiet.
+        p.write(b"PS1='$ ' sh\r");
+        let t = Instant::now();
+        let c = p.run("echo inner");
+        assert_eq!(c.exit, None);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
         p.kill();
     }
 
