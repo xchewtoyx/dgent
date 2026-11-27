@@ -1,0 +1,12 @@
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}, "parent_tool_use_id": null, "thinking_display": "updates", "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 50}}, "parent_tool_use_id": null, "thinking_display": "updates", "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": null}}, "parent_tool_use_id": null, "thinking_display": "updates", "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "redacted"}}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "redacted"}]}, "parent_tool_use_id": null, "timestamp": "2026-11-27T08:01:57.693Z", "request_id": "req_011ChT5jnzm67LEszXKtZNKa", "thinking_duration_ms": 826, "thinking_display": "updates"}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "hello there"}}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello there"}]}, "parent_tool_use_id": null, "timestamp": "2026-11-27T08:01:57.697Z", "request_id": "req_011ChT5jnzm67LEszXKtZNKa"}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 1}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "stream_event", "event": {"type": "message_stop"}, "parent_tool_use_id": null, "api_message_id": "msg_011ChT5jo8htfL4VZcAh72bL"}
+{"type": "result", "subtype": "success", "is_error": false, "result": "hello there", "stop_reason": "end_turn", "num_turns": 1, "total_cost_usd": 0.0366104}
