@@ -43,4 +43,5 @@ tmux send-keys -t "$s" e BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace
 screen=$(tmux capture-pane -t "$s" -p)
 grep -qx 'edited' <<<"$screen" || { echo "edited command did not run"; echo "$screen"; exit 1; }
 tmux send-keys -t "$s" C-] q; sleep 0.5
+! tmux has-session -t "$s" 2>/dev/null || { echo "dgent did not quit after approvals"; exit 1; }
 echo ok
