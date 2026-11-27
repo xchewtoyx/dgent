@@ -113,12 +113,10 @@ impl ClaudeBackend {
         let mut stderr = child.stderr.take().unwrap();
         let turn: Turn = Arc::default();
 
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let buf = stderr_buf.clone();
-        thread::spawn(move || {
+        let stderr_reader = thread::spawn(move || {
             let mut s = String::new();
             let _ = stderr.read_to_string(&mut s);
-            *buf.lock().unwrap() = s;
+            s
         });
 
         let t = turn.clone();
@@ -136,9 +134,8 @@ impl ClaudeBackend {
                     *guard = None;
                 }
             }
-            // Give stderr a moment to be collected so the error says why claude died.
-            thread::sleep(std::time::Duration::from_millis(100));
-            let why = stderr_buf.lock().unwrap().trim().to_string();
+            // stderr closes when claude exits, so this returns once the reason is all in.
+            let why = stderr_reader.join().unwrap_or_default().trim().to_string();
             if let Some(tx) = t.lock().unwrap().take() {
                 let _ = tx.send(Event::Error(format!("claude exited: {why}")));
             }
