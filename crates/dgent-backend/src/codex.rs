@@ -70,19 +70,8 @@ impl CodexBackend {
         for f in DISABLED_FEATURES {
             cmd.args(["--disable", f]);
         }
-        // The user's own MCP servers could act outside the pane. An inline
-        // `mcp_servers={}` merges rather than replaces, so disable each by name.
-        for name in user_mcp_servers(codex_bin)? {
-            cmd.arg("-c")
-                .arg(format!("mcp_servers.{name}.enabled=false"));
-        }
-        if let Some(exe) = dgent_exe {
-            // A JSON string literal is also a valid TOML basic string.
-            let exe = Value::String(exe.to_string_lossy().into_owned());
-            cmd.arg("-c")
-                .arg(format!("mcp_servers.dgent.command={exe}"))
-                .args(["-c", "mcp_servers.dgent.args=[\"mcp\"]"]);
-        }
+        let user = user_mcp_servers(codex_bin)?;
+        cmd.arg("-c").arg(mcp_override(&user, dgent_exe));
         cmd.args(["-c", "forced_login_method=\"chatgpt\""])
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
@@ -243,23 +232,31 @@ fn user_mcp_servers(codex_bin: &str) -> Result<Vec<String>> {
 }
 
 fn enabled_server_names(list: &Value) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    for s in list.as_array().into_iter().flatten() {
-        let name = s["name"].as_str().unwrap_or_default();
-        if s["enabled"] == false || name == "dgent" {
-            continue;
-        }
-        // Fail closed on a name that can't be a bare dotted-key segment.
-        anyhow::ensure!(
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-            "can't disable Codex MCP server {name:?}"
-        );
-        names.push(name.to_owned());
+    Ok(list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["enabled"] != false && s["name"] != "dgent")
+        .filter_map(|s| s["name"].as_str().map(str::to_owned))
+        .collect())
+}
+
+/// One `mcp_servers=...` override: disable the user's own servers (they could
+/// act outside the pane) and register the dgent bridge if given. The inline
+/// table merges into config.toml, so each user entry keeps its transport and
+/// only gains `enabled=false`. Keys are quoted, so names like `docs.v2` work.
+fn mcp_override(user: &[String], dgent_exe: Option<&Path>) -> String {
+    // A JSON string literal is also a valid TOML basic string.
+    let q = |s: &str| Value::String(s.to_owned()).to_string();
+    let mut entries: Vec<String> = user
+        .iter()
+        .map(|n| format!("{}={{enabled=false}}", q(n)))
+        .collect();
+    if let Some(exe) = dgent_exe {
+        let exe = q(&exe.to_string_lossy());
+        entries.push(format!("dgent={{command={exe},args=[\"mcp\"]}}"));
     }
-    Ok(names)
+    format!("mcp_servers={{{}}}", entries.join(","))
 }
 
 fn read_loop(reader: impl Read, writer: &Writer, shared: &Mutex<Shared>) {
@@ -508,7 +505,11 @@ mod tests {
             {"name": "dgent", "enabled": true}
         ]);
         assert_eq!(enabled_server_names(&list).unwrap(), vec!["userdocs"]);
-        assert!(enabled_server_names(&json!([{"name": "a.b", "enabled": true}])).is_err());
+        assert_eq!(
+            mcp_override(&["docs.v2".into()], Some(Path::new("/bin/dgent"))),
+            r#"mcp_servers={"docs.v2"={enabled=false},dgent={command="/bin/dgent",args=["mcp"]}}"#
+        );
+        assert_eq!(mcp_override(&[], None), "mcp_servers={}");
     }
 
     #[test]
