@@ -63,9 +63,9 @@ fn mask_assignments(text: &str) -> Option<String> {
         let start = key.end();
         let rest = &text[start..];
         let len = match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => rest[1..].find([q, '\n']).map_or(rest.len(), |e| {
-                e + 1 + usize::from(rest[1 + e..].starts_with(q))
-            }),
+            Some(q @ ('"' | '\'')) => quoted_len(rest.as_bytes(), q as u8),
+            // Arrays and objects can hold several secrets: mask the rest of the line.
+            Some('[' | '{') => rest.find('\n').unwrap_or(rest.len()),
             _ => {
                 let next = keys[i + 1..]
                     .iter()
@@ -83,6 +83,22 @@ fn mask_assignments(text: &str) -> Option<String> {
         done = start + len;
     }
     (done > 0).then(|| out + &text[done..])
+}
+
+/// Length of the quoted value at the start of `s`, through its closing quote,
+/// skipping backslash escapes; stops at end of line if the quote is unclosed.
+fn quoted_len(s: &[u8], q: u8) -> usize {
+    let mut i = 1;
+    while i < s.len() {
+        match s[i] {
+            b'\\' => i += 1,
+            b'\n' => return i,
+            c if c == q => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    s.len()
 }
 
 /// Returns `text` with known secret shapes replaced by `[REDACTED]`.
@@ -157,6 +173,14 @@ mod tests {
             (
                 r#"{"user":"a","password":"p1","api_key":"k1"}"#,
                 r#"{"user":"a","password":[REDACTED],"api_key":[REDACTED]}"#,
+            ),
+            (
+                r#""SecretString": "{\"user\":\"a\",\"password\":\"p\"}", "ARN": "x""#,
+                r#""SecretString": [REDACTED], "ARN": "x""#,
+            ),
+            (
+                "\"tokens\": [\"a\", \"b\"], next\nok",
+                "\"tokens\": [REDACTED]\nok",
             ),
         ];
         for (input, want) in cases {
