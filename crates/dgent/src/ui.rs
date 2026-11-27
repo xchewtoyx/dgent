@@ -95,9 +95,7 @@ impl Panel {
         .map(|l| Line::from(l.as_str()))
         .collect();
         if self.hidden {
-            shown.push(Line::from(
-                "[too tall to show: enlarge the terminal, or e edit, n deny]",
-            ));
+            shown.push(Line::from("[too tall to show]"));
         }
         f.render_widget(Paragraph::new(shown).style(style), ask);
     }

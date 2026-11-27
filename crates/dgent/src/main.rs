@@ -154,6 +154,9 @@ fn main() -> Result<()> {
                 panel.render(f, side, backend.name(), editing);
             }
             let mut line = match &mode {
+                Mode::Normal if panel.hidden => {
+                    Line::from(" dgent | too tall to approve: enlarge, or e edit, n deny")
+                }
                 Mode::Normal if panel.pending.is_some() => {
                     Line::from(" dgent | approve: y run, n deny, e edit")
                 }
