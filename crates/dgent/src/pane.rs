@@ -14,6 +14,7 @@ use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native
 /// Cost: apps that hardcode xterm key sequences for TERM=xterm* (e.g. Vim's modified arrows)
 /// fall back to screen's, and Home/End are sent as screen's `ESC[1~`/`ESC[4~` (see keys.rs).
 pub const TERM: &str = "screen-256color";
+const MARK_D: &[u8] = b"\x1b]133;D";
 const SCROLLBACK: usize = 10_000;
 /// For shells that emit no OSC 133 marks, `run` treats this long without output as the end.
 const QUIET: Duration = Duration::from_secs(1);
@@ -32,6 +33,8 @@ pub struct Pane {
     /// prompt we're at came straight after a mark, so the current shell (local or remote)
     /// emits marks and `run` can wait for one.
     lines_since_mark: usize,
+    /// Last few output bytes, to find a D mark split across reads.
+    tail: Vec<u8>,
 }
 
 /// What a command printed, and its exit code when the shell emits OSC 133 marks.
@@ -87,6 +90,7 @@ impl Pane {
             in_tx,
             capture: None,
             lines_since_mark: usize::MAX,
+            tail: Vec::new(),
         })
     }
 
@@ -107,12 +111,15 @@ impl Pane {
             match self.out_rx.try_recv() {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
-                    // shortcut: misses a mark split across reads; the next prompt catches it.
+                    // Search with the previous read's tail so a mark split across reads counts.
+                    let mut joined = std::mem::take(&mut self.tail);
+                    joined.extend_from_slice(&bytes);
                     let newlines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
-                    self.lines_since_mark = match rfind(&bytes, b"\x1b]133;D") {
-                        Some(d) => newlines(&bytes[d..]),
+                    self.lines_since_mark = match rfind(&joined, MARK_D) {
+                        Some(d) => newlines(&joined[d..]),
                         None => self.lines_since_mark.saturating_add(newlines(&bytes)),
                     };
+                    self.tail = joined[joined.len().saturating_sub(MARK_D.len() - 1)..].to_vec();
                     if let Some(c) = &mut self.capture {
                         c.extend_from_slice(&bytes);
                     }
@@ -229,7 +236,7 @@ fn osc_end(buf: &[u8], from: usize) -> Option<usize> {
 /// OSC 133;D mark has arrived; otherwise takes everything as output with an unknown exit.
 /// A command that prints a D mark itself can fake its end and exit code (inherent to OSC 133).
 fn parse_capture(buf: &[u8], need_end: bool) -> Option<Capture> {
-    let mark = find(buf, b"\x1b]133;D").and_then(|d| Some((d, osc_end(buf, d + 7)?)));
+    let mark = find(buf, MARK_D).and_then(|d| Some((d, osc_end(buf, d + 7)?)));
     let (body, exit) = match mark {
         Some((d, end)) => {
             let params = String::from_utf8_lossy(&buf[d + 7..end]);
