@@ -4,6 +4,7 @@
 //! [`Backend`]. Prefix key is Ctrl-]; then `a` asks, `q` quits, Ctrl-] sends a
 //! literal Ctrl-].
 
+mod config;
 mod keys;
 
 use std::io::{Read, Write};
@@ -21,8 +22,6 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-/// How many screen lines go to the backend with a question.
-const CONTEXT_LINES: usize = 40;
 const PANEL_HEIGHT: u16 = 8;
 
 enum Mode {
@@ -32,6 +31,7 @@ enum Mode {
 }
 
 fn main() -> Result<()> {
+    let cfg = config::Config::load(std::env::args().skip(1))?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (cols, rows) = terminal::size()?;
 
@@ -67,6 +67,10 @@ fn main() -> Result<()> {
     let mut backend: Box<dyn Backend> = Box::new(EchoBackend);
     let mut turn: Option<Receiver<AgentEvent>> = None;
     let mut panel = String::new();
+    // shortcut: claude/codex fall back to echo until W5/W6 add them to this match.
+    if cfg.backend != config::BackendKind::Echo {
+        panel = format!("[{:?} backend not built yet, using echo]", cfg.backend);
+    }
     let mut mode = Mode::Normal;
     let mut pane_size = (rows, cols);
 
@@ -189,7 +193,10 @@ fn main() -> Result<()> {
                         _ => Mode::Normal,
                     },
                     Mode::Ask(q) => ask_key(key, q, |prompt| {
-                        let context = tail(&parser.screen().contents(), CONTEXT_LINES);
+                        let context = tail_bytes(
+                            tail(&parser.screen().contents(), cfg.context_lines),
+                            cfg.context_bytes,
+                        );
                         panel = format!("> {prompt}\n");
                         match backend.ask(Request { prompt, context }) {
                             Ok(rx) => turn = Some(rx),
@@ -259,11 +266,28 @@ fn tail(s: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// Keep at most the last `max` bytes, cut at a char boundary.
+fn tail_bytes(mut s: String, max: usize) -> String {
+    let mut cut = s.len().saturating_sub(max);
+    while !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s.drain(..cut);
+    s
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn tail_keeps_last_lines() {
         assert_eq!(super::tail("a\nb\nc\n\n", 2), "b\nc");
         assert_eq!(super::tail("", 2), "");
+    }
+
+    #[test]
+    fn tail_bytes_cuts_at_char_boundary() {
+        assert_eq!(super::tail_bytes("abcdef".into(), 3), "def");
+        assert_eq!(super::tail_bytes("aé".into(), 1), "");
+        assert_eq!(super::tail_bytes("ab".into(), 9), "ab");
     }
 }
