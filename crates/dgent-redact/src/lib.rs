@@ -67,12 +67,12 @@ fn mask_assignments(text: &str) -> Option<String> {
                 e + 1 + usize::from(rest[1 + e..].starts_with(q))
             }),
             _ => {
-                let ws = rest.find(char::is_whitespace).unwrap_or(rest.len());
                 let next = keys[i + 1..]
                     .iter()
                     .map(|k| k.start() - start)
-                    .find(|&k| k > 0);
-                next.map_or(ws, |n| n.min(ws))
+                    .find(|&k| k > 0)
+                    .unwrap_or(rest.len());
+                rest[..next].find(char::is_whitespace).unwrap_or(next)
             }
         };
         if len == 0 {
