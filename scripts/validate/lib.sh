@@ -15,8 +15,9 @@ SSH_HOST=${DGENT_SSH_HOST:-}
 
 step()   { printf '\n== %s\n' "$*"; }
 ok()     { echo "  PASS  $*"; PASS=$((PASS + 1)); }
-# With DGENT_KEEP=1 the first failure stops the script, so its tmux session is the one kept.
-bad()    { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); [ "${DGENT_KEEP:-}" = 1 ] && finish; }
+bad()    { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
+# With DGENT_KEEP=1, stop before the TUI session that saw a failure is quit or replaced.
+kept()   { [ "${DGENT_KEEP:-}" = 1 ] && [ "$FAIL" -gt 0 ] && finish; return 0; }
 skip()   { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 manual() { MANUAL+=("$*"); }
 
@@ -74,6 +75,7 @@ smoke() { check "scripts/smoke.sh" ./scripts/smoke.sh "$TMP/dgent-echo"; }
 
 # tstart [SHELL] [dgent args...]: start dgent in a fresh detached tmux session.
 tstart() {
+  kept
   local sh=${1:-$TMP/bash}; shift || true
   tmux kill-session -t "$S" 2>/dev/null
   # An already-running tmux server has its own env; pass the config dir through explicitly.
@@ -88,7 +90,7 @@ ttype()   { tmux send-keys -t "$S" -l "$1"; tmux send-keys -t "$S" Enter; sleep 
 tscreen() { tmux capture-pane -t "$S" -p; }
 tstatus() { tscreen | grep -v '^$' | tail -n 1; }
 task()    { tkeys C-] a; sleep 0.3; ttype "$1" "${2:-0.8}"; }
-tquit()   { tkeys C-] q; sleep 0.8; }
+tquit()   { kept; tkeys C-] q; sleep 0.8; }
 tpid()    { pgrep -n -f "^$BIN" ; }
 
 # texpect REGEX "description": PASS once the screen matches (waits up to ${WAIT:-5}s).

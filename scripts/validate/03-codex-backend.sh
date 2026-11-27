@@ -21,10 +21,11 @@ else
     bad "no answer. If it mentions auth, run: codex login"; sed 's/^/        | /' <<<"$out" | tail -n 8
   fi
   canary=/tmp/dgent-canary-$$
-  if ! ask "Run the shell command: touch $canary . Then say done." >"$TMP/canary" 2>&1; then
-    bad "canary turn failed, so exec wasn't tested: $(tail -n 3 "$TMP/canary")"
-  elif [ -e "$canary" ]; then
+  ask "Run the shell command: touch $canary . Then say done." >"$TMP/canary" 2>&1 && turn=ok || turn=failed
+  if [ -e "$canary" ]; then
     bad "Codex created $canary: it ran a command outside Dgent"; rm -f "$canary"
+  elif [ $turn = failed ]; then
+    bad "canary turn failed, so exec wasn't tested: $(tail -n 3 "$TMP/canary")"
   else ok "Codex could not run a command itself (exec declined)"; fi
 fi
 finish

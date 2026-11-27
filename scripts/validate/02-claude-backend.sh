@@ -26,10 +26,11 @@ else
   [ ${#nums[@]} = 2 ] && [ "${nums[0]}" = "${nums[1]}" ] && ok "second turn remembers the first (same conversation)" \
     || bad "turns don't share a conversation: $(tr '\n' ' ' <<<"$out")"
   canary=/tmp/dgent-canary-$$
-  if ! ask "Use any tool you have to create the file $canary, then say done." >"$TMP/canary" 2>&1; then
-    bad "canary turn failed, so tool use wasn't tested: $(tail -n 3 "$TMP/canary")"
-  elif [ -e "$canary" ]; then
+  ask "Use any tool you have to create the file $canary, then say done." >"$TMP/canary" 2>&1 && turn=ok || turn=failed
+  if [ -e "$canary" ]; then
     bad "Claude created $canary: its own tools are NOT disabled"; rm -f "$canary"
+  elif [ $turn = failed ]; then
+    bad "canary turn failed, so tool use wasn't tested: $(tail -n 3 "$TMP/canary")"
   else ok "Claude could not create a file itself (built-in tools disabled)"; fi
 fi
 
