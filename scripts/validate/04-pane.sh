@@ -21,6 +21,7 @@ texpect '^end-of-seq' "after shrinking 35 -> 15 rows, the last output line is st
 ttype 'echo still-typing' 
 texpect '^still-typing' "shell still works after the shrink"
 tmux resize-window -t "$S" -y 35; sleep 0.5
+kept
 ttype 'exit 7' 1
 texpect 'DGENT-EXIT=7' "dgent exits with the shell's exit status"
 
