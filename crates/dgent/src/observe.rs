@@ -16,13 +16,14 @@ use std::ops::Range;
 /// One line, typed into the active shell, that makes bash or zsh emit OSC 133 marks for
 /// the rest of the session. Leading space keeps it out of history (`HISTCONTROL=ignorespace`,
 /// zsh `HIST_IGNORE_SPACE`). `$_dg_s` carries `$?` past our printf so the user's own
-/// `PROMPT_COMMAND` still sees it. zsh's branch is under `eval` so sh/dash can parse the line.
+/// `PROMPT_COMMAND` still sees it (`&& :` so `set -e` doesn't exit on it). `$_dg_on` makes a
+/// second `C-] i` a no-op. zsh's branch is under `eval` so sh/dash can parse the line.
 pub const INJECT: &str = concat!(
-    r#" if [ -n "$ZSH_VERSION" ]; then eval '_dg_pre(){ printf "\033]133;D;%s\007\033]133;A\007" $?; }; "#,
+    r#" if [ -n "$_dg_on" ]; then :; elif [ -n "$ZSH_VERSION" ]; then _dg_on=1; eval '_dg_pre(){ printf "\033]133;D;%s\007\033]133;A\007" $?; }; "#,
     r#"_dg_exe(){ printf "\033]133;C\007"; }; precmd_functions=(_dg_pre $precmd_functions); "#,
     r#"preexec_functions+=(_dg_exe); PS1="$PS1%{$(printf "\033]133;B\007")%}"'; "#,
-    r#"elif [ -n "$BASH_VERSION" ]; then "#,
-    r#"PROMPT_COMMAND='_dg_s=$?; printf "\033]133;D;%s\007\033]133;A\007" $_dg_s; (exit $_dg_s)'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; "#,
+    r#"elif [ -n "$BASH_VERSION" ]; then _dg_on=1; "#,
+    r#"PROMPT_COMMAND='_dg_s=$?; printf "\033]133;D;%s\007\033]133;A\007" $_dg_s; (exit $_dg_s) && :'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; "#,
     r#"PS0='\033]133;C\007'"$PS0"; PS1="$PS1"'\[\033]133;B\007\]'; "#,
     r#"else echo 'dgent: command marks need bash or zsh'; fi"#,
     "\r"
@@ -93,7 +94,9 @@ enum Mark {
     #[default]
     None,
     Prompt,
-    Input,
+    Input {
+        start: u64,
+    },
     Output {
         start: u64,
     },
@@ -156,6 +159,16 @@ impl Observer {
     /// have this problem.
     pub fn idle(&mut self) -> Option<CommandFinished> {
         let mut done = Vec::new();
+        // A marked shell that ended at its prompt (Ctrl-D, or ssh dropped) sends no `C`/`D`.
+        // Input after `B` is one line until `C`, so a newline then a prompt means an unmarked
+        // shell is back: go back to guessing.
+        if matches!(self.mark, Mark::Input { .. })
+            && self.buf.contains(&b'\n')
+            && looks_like_prompt(&last_line(&self.buf))
+        {
+            self.mark = Mark::None;
+            self.guess = Guess::Idle;
+        }
         if self.mark_allows_guess() && self.esc == Parse::Ground {
             self.guess_prompt(&mut done);
         }
@@ -267,7 +280,9 @@ impl Observer {
         match parts.next() {
             Some("A") => self.mark = Mark::Prompt,
             Some("B") => {
-                self.mark = Mark::Input;
+                self.mark = Mark::Input {
+                    start: self.pos + 1,
+                };
                 self.buf.clear();
             }
             Some("C") => {
@@ -287,14 +302,15 @@ impl Observer {
                         let cmd = std::mem::take(&mut self.cmd);
                         self.emit(done, cmd, start..end, exit);
                     }
-                    // No `C` (bash < 4.4 has no PS0): the first line is the command.
-                    Mark::Input => {
+                    // No `C` (bash < 4.4 has no PS0): the first line is the command, and
+                    // `output_range` includes it.
+                    Mark::Input { start } => {
                         let text = text_of(&self.buf);
                         let (cmd, _) = text.split_once('\n').unwrap_or((&text, ""));
                         let cmd = cmd.trim().to_string();
                         let first = self.buf.iter().position(|&c| c == b'\n');
                         self.buf.drain(..first.map_or(self.buf.len(), |i| i + 1));
-                        self.emit(done, cmd, end..end, exit);
+                        self.emit(done, cmd, start..end, exit);
                     }
                     // D with no command pending (startup, or an outer shell after an inner one).
                     _ => {}
@@ -309,14 +325,17 @@ impl Observer {
         if self.cr {
             return;
         }
-        let line = last_line(&self.buf);
-        if !PROMPT_ENDS.iter().any(|end| line.ends_with(end)) {
+        if !looks_like_prompt(&last_line(&self.buf)) {
             return;
         }
         match std::mem::replace(&mut self.guess, Guess::Prompt) {
             Guess::Prompt => self.guess = Guess::Prompt,
             Guess::Output { cmd, start } => {
-                let keep = self.buf.len() - line.len();
+                let keep = self
+                    .buf
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |i| i + 1);
                 self.buf.truncate(keep);
                 let end = self.line_start;
                 self.emit(done, cmd, start..end, None);
@@ -358,6 +377,10 @@ impl Observer {
 
 fn text_of(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn looks_like_prompt(line: &str) -> bool {
+    PROMPT_ENDS.iter().any(|end| line.ends_with(end))
 }
 
 fn last_line(buf: &[u8]) -> String {
@@ -500,6 +523,26 @@ mod tests {
         let done = o.feed(b"\x1b]133;D;1\x07");
         assert_eq!(done.len(), 1, "vim's own D must still be reported");
         assert_eq!(done[0].exit, Some(1));
+    }
+
+    #[test]
+    fn non_utf8_prompt_after_silent_command() {
+        let mut o = Observer::new();
+        o.feed(b"caf\xe9$ ");
+        o.idle();
+        o.feed(b"true\r\ncaf\xe9$ ");
+        let f = o.idle().unwrap();
+        assert_eq!((f.cmd.as_str(), f.output.as_str()), ("true", ""));
+    }
+
+    #[test]
+    fn marked_shell_ending_at_its_prompt_hands_back_to_guessing() {
+        let mut o = Observer::new();
+        // Remote marked prompt, then Ctrl-D: no C or D, just the local unmarked prompt.
+        o.feed(b"\x1b]133;A\x07r$ \x1b]133;B\x07logout\r\nConnection closed.\r\n$ ");
+        assert_eq!(o.idle(), None);
+        o.feed(b"ls /nope\r\nls: /nope: No such file or directory\r\n$ ");
+        assert!(o.idle().unwrap().failed());
     }
 
     #[test]
