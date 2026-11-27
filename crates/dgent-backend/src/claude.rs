@@ -49,6 +49,9 @@ impl ClaudeConfig {
             "--tools",
             "",
             "--strict-mcp-config",
+            // Only ~/.claude settings: a project's .claude/ hooks would run unapproved in print mode.
+            "--setting-sources",
+            "user",
             "--append-system-prompt",
             SYSTEM_PROMPT,
         ]
@@ -94,8 +97,12 @@ impl ClaudeBackend {
     pub fn spawn(cfg: &ClaudeConfig) -> Result<Self> {
         let mut child = Command::new(&cfg.program)
             .args(cfg.args())
-            // Subscription login only: an API key in the environment would take precedence.
+            // Subscription login only: these would take precedence over `claude login`.
             .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("CLAUDE_CODE_USE_BEDROCK")
+            .env_remove("CLAUDE_CODE_USE_VERTEX")
+            .env_remove("CLAUDE_CODE_USE_FOUNDRY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -212,13 +219,31 @@ fn parse_line(line: &str) -> Option<Event> {
         "stream_event" if v["event"]["delta"]["type"] == "text_delta" => Some(Event::Text(
             v["event"]["delta"]["text"].as_str()?.to_string(),
         )),
-        "result" if v["is_error"] == true => Some(Event::Error(
-            v["result"]
-                .as_str()
-                .or(v["subtype"].as_str())
-                .unwrap_or("claude error")
-                .to_string(),
-        )),
+        // Backstop for credentials set in ~/.claude settings: "none" means the subscription login.
+        // shortcut: the turn keeps running in claude after this error; restart the backend if it fires.
+        "system"
+            if v["subtype"] == "init"
+                && !matches!(v["apiKeySource"].as_str(), None | Some("none")) =>
+        {
+            Some(Event::Error(format!(
+                "claude is using {} instead of your subscription login",
+                v["apiKeySource"]
+            )))
+        }
+        "result" if v["is_error"] == true => {
+            let errors: Vec<&str> = v["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let msg = match v["result"].as_str() {
+                Some(r) if !r.is_empty() => r.to_string(),
+                _ if !errors.is_empty() => errors.join("; "),
+                _ => v["subtype"].as_str().unwrap_or("claude error").to_string(),
+            };
+            Some(Event::Error(msg))
+        }
         "result" => Some(Event::Done),
         _ => None,
     }
@@ -330,5 +355,40 @@ mod tests {
         );
         *turn.lock().unwrap() = None;
         assert!(!Proposer(turn).propose("2".into(), "ls".into()));
+    }
+
+    #[test]
+    fn reply_forwards_id_and_decision_to_sink() {
+        let (tx, rx) = mpsc::channel();
+        let mut b = ClaudeBackend::spawn(&ClaudeConfig {
+            program: "cat".into(),
+            mcp_command: None,
+        })
+        .unwrap();
+        assert!(b.reply("1", ToolReply::Denied).is_err());
+        b.set_reply_sink(Box::new(move |id, r| Ok(tx.send((id.to_string(), r))?)));
+        b.reply("7", ToolReply::Output("ok".into())).unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            ("7".into(), ToolReply::Output("ok".into()))
+        );
+    }
+
+    #[test]
+    fn errors_array_and_non_subscription_auth_surface() {
+        assert_eq!(
+            parse_line(
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["bad settings.json"]}"#
+            ),
+            Some(Event::Error("bad settings.json".into()))
+        );
+        assert_eq!(
+            parse_line(r#"{"type":"system","subtype":"init","apiKeySource":"none"}"#),
+            None
+        );
+        assert!(matches!(
+            parse_line(r#"{"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}"#),
+            Some(Event::Error(e)) if e.contains("apiKeyHelper")
+        ));
     }
 }
