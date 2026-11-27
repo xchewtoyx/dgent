@@ -268,7 +268,8 @@ impl Observer {
     }
 
     fn mark_allows_guess(&self) -> bool {
-        matches!(self.mark, Mark::None | Mark::Output { .. })
+        // Not at a marked shell's input line: shells that send only `A`/`D` still need guessing.
+        !matches!(self.mark, Mark::Input { .. })
     }
 
     fn osc_done(&mut self, done: &mut Vec<CommandFinished>) {
@@ -277,7 +278,7 @@ impl Observer {
         if parts.next() != Some("133") {
             return;
         }
-        self.guess = Guess::Idle;
+        let guess = std::mem::take(&mut self.guess);
         match parts.next() {
             Some("A") => self.mark = Mark::Prompt,
             Some("B") => {
@@ -312,6 +313,12 @@ impl Observer {
                         let first = self.buf.iter().position(|&c| c == b'\n');
                         self.buf.drain(..first.map_or(self.buf.len(), |i| i + 1));
                         self.emit(done, cmd, start..end, exit);
+                    }
+                    // `A`/`D` only, no `B`/`C`: the command came from guessing, the exit from `D`.
+                    Mark::Prompt if matches!(guess, Guess::Output { .. }) => {
+                        if let Guess::Output { cmd, start } = guess {
+                            self.emit(done, cmd, start..end, exit);
+                        }
                     }
                     // D with no command pending (startup, or an outer shell after an inner one).
                     _ => {}
@@ -544,6 +551,15 @@ mod tests {
         assert_eq!(o.idle(), None);
         o.feed(b"ls /nope\r\nls: /nope: No such file or directory\r\n$ ");
         assert!(o.idle().unwrap().failed());
+    }
+
+    #[test]
+    fn shell_sending_only_a_and_d() {
+        let mut o = Observer::new();
+        o.feed(b"\x1b]133;A\x07$ ");
+        o.idle();
+        let done = o.feed(b"ls /nope\r\nls: /nope: No such file or directory\r\n\x1b]133;D;2\x07");
+        assert_eq!((done[0].cmd.as_str(), done[0].exit), ("ls /nope", Some(2)));
     }
 
     #[test]
