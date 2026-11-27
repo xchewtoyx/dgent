@@ -165,6 +165,9 @@ fn main() -> Result<()> {
                     Line::from(" dgent | prefix: a ask, q quit, c clear, k/j scroll, C-] literal")
                 }
                 Mode::Ask(q) => Line::from(format!(" ask> {q}")),
+                Mode::Edit(_) if panel.hidden => {
+                    Line::from(" dgent | too tall to run: enlarge or shorten it, Esc back")
+                }
                 Mode::Edit(_) => Line::from(" dgent | edit: Enter run, Esc back"),
             };
             if let Some(hint) = &panel.hint {
@@ -260,6 +263,7 @@ fn main() -> Result<()> {
                         Ok(cmd) => Mode::Edit(cmd),
                         // Esc (or an emptied line) goes back to the y/n/e choice.
                         Err(None) => Mode::Normal,
+                        Err(Some(cmd)) if panel.hidden => Mode::Edit(cmd),
                         Err(Some(cmd)) => {
                             let p = panel.pending.take().unwrap();
                             answer(&mut *backend, &mut panel, p, Some((&mut writer, cmd)));

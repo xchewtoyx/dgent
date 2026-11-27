@@ -84,17 +84,19 @@ impl Panel {
             .map(|l| Line::from(l.as_str()))
             .collect();
         f.render_widget(Paragraph::new(shown), body);
-        // Editing keeps the tail (the cursor end) in view; a proposal too tall to show whole
-        // can't be approved. shortcut: no prompt scrolling, add it if huge commands become common.
-        self.hidden = prompt.len() > prompt_h && editing.is_none();
-        let mut shown: Vec<Line> = if self.hidden {
+        // A command too tall to show whole can't be run, by `y` or by Enter in the editor.
+        // Editing keeps the tail (the cursor end) in view so the user can shorten it.
+        // shortcut: no prompt scrolling, add it if huge commands become common.
+        self.hidden = prompt.len() > prompt_h;
+        let proposal_hidden = self.hidden && editing.is_none();
+        let mut shown: Vec<Line> = if proposal_hidden {
             prompt[..prompt_h.saturating_sub(1)].iter()
         } else {
             prompt[prompt.len() - prompt_h..].iter()
         }
         .map(|l| Line::from(l.as_str()))
         .collect();
-        if self.hidden {
+        if proposal_hidden {
             shown.push(Line::from("[too tall to show]"));
         }
         f.render_widget(Paragraph::new(shown).style(style), ask);
@@ -136,6 +138,10 @@ mod tests {
         panel.pending.as_mut().unwrap().command = "ls".into();
         term.draw(|f| panel.render(f, f.area(), "t", None)).unwrap();
         assert!(!panel.hidden);
+        let long = "x".repeat(100);
+        term.draw(|f| panel.render(f, f.area(), "t", Some(&long)))
+            .unwrap();
+        assert!(panel.hidden, "a too-tall edit must not be runnable either");
     }
 
     #[test]
