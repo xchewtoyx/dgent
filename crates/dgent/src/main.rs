@@ -2,9 +2,10 @@
 //!
 //! Scaffold: one shell in a PTY, a status line, and an "ask" prompt wired to a
 //! [`Backend`]. Prefix key is Ctrl-]; then `a` asks, `q` quits, Ctrl-] sends a
-//! literal Ctrl-].
+//! literal Ctrl-]. A proposed command waits in the panel for `y` / `n` / `e`.
 
 mod keys;
+mod ui;
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver};
@@ -13,12 +14,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request};
+use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request, ToolReply};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use tui_term::widget::PseudoTerminal;
 
 /// How many screen lines go to the backend with a question.
@@ -29,6 +30,8 @@ enum Mode {
     Normal,
     Prefix,
     Ask(String),
+    /// Editing the pending proposal before running it.
+    Edit(String),
 }
 
 fn main() -> Result<()> {
@@ -64,9 +67,9 @@ fn main() -> Result<()> {
     });
 
     let mut parser = vt100::Parser::new(rows, cols, 10_000);
-    let mut backend: Box<dyn Backend> = Box::new(EchoBackend);
+    let mut backend: Box<dyn Backend> = Box::new(EchoBackend::default());
     let mut turn: Option<Receiver<AgentEvent>> = None;
-    let mut panel = String::new();
+    let mut panel = ui::Panel::default();
     let mut mode = Mode::Normal;
     let mut pane_size = (rows, cols);
 
@@ -97,11 +100,14 @@ fn main() -> Result<()> {
         if let Some(rx) = &turn {
             while let Ok(ev) = rx.try_recv() {
                 match ev {
-                    AgentEvent::Text(t) => panel.push_str(&t),
-                    AgentEvent::ProposeCommand { command, .. } => {
-                        panel.push_str(&format!("\n[proposed] {command} (approval not wired yet)"))
+                    AgentEvent::Text(t) => panel.push(&t),
+                    AgentEvent::ProposeCommand { id, command } => {
+                        // One at a time: a newer proposal supersedes (denies) an unanswered one.
+                        if let Some(old) = panel.pending.replace(ui::Proposal { id, command }) {
+                            answer(&mut *backend, &mut panel, old, None);
+                        }
                     }
-                    AgentEvent::Error(e) => panel.push_str(&format!("\n[error] {e}")),
+                    AgentEvent::Error(e) => panel.push(&format!("\n[error] {e}")),
                     AgentEvent::Done => {}
                 }
             }
@@ -112,7 +118,7 @@ fn main() -> Result<()> {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
         // The panel overlays the bottom of the pane rather than shrinking it: vt100 drops
         // rows on a height decrease, so resizing for the panel would erase shell output.
-        let panel_h = if panel.is_empty() {
+        let panel_h = if !panel.visible() {
             0
         } else {
             PANEL_HEIGHT.min(pane.height)
@@ -135,23 +141,27 @@ fn main() -> Result<()> {
 
         term.draw(|f| {
             f.render_widget(PseudoTerminal::new(parser.screen()), pane);
-            if panel_h > 0 {
-                let block = Block::default()
-                    .borders(Borders::TOP)
-                    .title(format!(" {} ", backend.name()));
-                f.render_widget(Clear, side);
-                f.render_widget(
-                    Paragraph::new(tail(&panel, PANEL_HEIGHT as usize - 1))
-                        .wrap(Wrap { trim: false })
-                        .block(block),
-                    side,
-                );
-            }
-            let line = match &mode {
-                Mode::Normal => Line::from(" dgent | C-] a: ask  C-] q: quit  C-] c: clear panel"),
-                Mode::Prefix => Line::from(" dgent | prefix: a ask, q quit, c clear, C-] literal"),
-                Mode::Ask(q) => Line::from(format!(" ask> {q}")),
+            let editing = match &mode {
+                Mode::Edit(cmd) => Some(cmd.as_str()),
+                _ => None,
             };
+            if panel_h > 0 {
+                panel.render(f, side, backend.name(), editing);
+            }
+            let mut line = match &mode {
+                Mode::Normal if panel.pending.is_some() => {
+                    Line::from(" dgent | approve: y run, n deny, e edit")
+                }
+                Mode::Normal => Line::from(" dgent | C-] a: ask  C-] q: quit  C-] c: clear panel"),
+                Mode::Prefix => {
+                    Line::from(" dgent | prefix: a ask, q quit, c clear, k/j scroll, C-] literal")
+                }
+                Mode::Ask(q) => Line::from(format!(" ask> {q}")),
+                Mode::Edit(_) => Line::from(" dgent | edit: Enter run, Esc back"),
+            };
+            if let Some(hint) = &panel.hint {
+                line.push_span(format!("  [{hint}]"));
+            }
             f.render_widget(
                 Paragraph::new(line).style(Style::default().reversed()),
                 status,
@@ -168,6 +178,24 @@ fn main() -> Result<()> {
                     && matches!(key.code, KeyCode::Char(']' | '5'));
                 mode = match std::mem::replace(&mut mode, Mode::Normal) {
                     Mode::Normal if prefix => Mode::Prefix,
+                    // While a proposal waits, keys answer it instead of reaching the shell.
+                    Mode::Normal if panel.pending.is_some() => match key.code {
+                        KeyCode::Char('y') => {
+                            let p = panel.pending.take().unwrap();
+                            let cmd = p.command.clone();
+                            answer(&mut *backend, &mut panel, p, Some((&mut writer, cmd)));
+                            Mode::Normal
+                        }
+                        KeyCode::Char('n') => {
+                            let p = panel.pending.take().unwrap();
+                            answer(&mut *backend, &mut panel, p, None);
+                            Mode::Normal
+                        }
+                        KeyCode::Char('e') => {
+                            Mode::Edit(panel.pending.as_ref().unwrap().command.clone())
+                        }
+                        _ => Mode::Normal,
+                    },
                     Mode::Normal => {
                         pty_write(
                             &mut writer,
@@ -179,7 +207,15 @@ fn main() -> Result<()> {
                         KeyCode::Char('q') => return Ok(0),
                         KeyCode::Char('a') => Mode::Ask(String::new()),
                         KeyCode::Char('c') => {
-                            panel.clear();
+                            panel.reset("");
+                            Mode::Normal
+                        }
+                        KeyCode::Char('k') => {
+                            panel.scroll(PANEL_HEIGHT as isize / 2);
+                            Mode::Normal
+                        }
+                        KeyCode::Char('j') => {
+                            panel.scroll(-(PANEL_HEIGHT as isize / 2));
                             Mode::Normal
                         }
                         _ if prefix => {
@@ -188,18 +224,37 @@ fn main() -> Result<()> {
                         }
                         _ => Mode::Normal,
                     },
-                    Mode::Ask(q) => ask_key(key, q, |prompt| {
-                        let context = tail(&parser.screen().contents(), CONTEXT_LINES);
-                        panel = format!("> {prompt}\n");
-                        match backend.ask(Request { prompt, context }) {
-                            Ok(rx) => turn = Some(rx),
-                            Err(e) => panel.push_str(&format!("[error] {e}")),
+                    Mode::Ask(q) => match edit_line(key, q) {
+                        Ok(q) => Mode::Ask(q),
+                        Err(None) => Mode::Normal,
+                        Err(Some(prompt)) => {
+                            // A new turn replaces the old one, so its open proposal can't be answered later.
+                            if let Some(old) = panel.pending.take() {
+                                answer(&mut *backend, &mut panel, old, None);
+                            }
+                            let context = tail(&parser.screen().contents(), CONTEXT_LINES);
+                            panel.reset(&format!("> {prompt}\n"));
+                            match backend.ask(Request { prompt, context }) {
+                                Ok(rx) => turn = Some(rx),
+                                Err(e) => panel.push(&format!("[error] {e}")),
+                            }
+                            Mode::Normal
                         }
-                    }),
+                    },
+                    Mode::Edit(cmd) => match edit_line(key, cmd) {
+                        Ok(cmd) => Mode::Edit(cmd),
+                        // Esc (or an emptied line) goes back to the y/n/e choice.
+                        Err(None) => Mode::Normal,
+                        Err(Some(cmd)) => {
+                            let p = panel.pending.take().unwrap();
+                            answer(&mut *backend, &mut panel, p, Some((&mut writer, cmd)));
+                            Mode::Normal
+                        }
+                    },
                 };
             }
             TermEvent::Paste(text) => {
-                if let Mode::Ask(q) = &mut mode {
+                if let Mode::Ask(q) | Mode::Edit(q) = &mut mode {
                     q.push_str(&text);
                 } else if parser.screen().bracketed_paste() {
                     pty_write(&mut writer, format!("\x1b[200~{text}\x1b[201~").as_bytes());
@@ -229,28 +284,51 @@ fn main() -> Result<()> {
 
 /// Write to the shell. Errors are dropped: once the PTY closes nothing reads input,
 /// and shell exit is detected via `try_wait`, not write failures.
-fn pty_write(w: &mut impl Write, bytes: &[u8]) {
+fn pty_write(w: &mut (impl Write + ?Sized), bytes: &[u8]) {
     let _ = w.write_all(bytes);
 }
 
-/// Line editing for the ask prompt. Calls `submit` on Enter.
-fn ask_key(key: KeyEvent, mut q: String, submit: impl FnOnce(String)) -> Mode {
-    match key.code {
-        KeyCode::Esc => Mode::Normal,
-        KeyCode::Enter if q.trim().is_empty() => Mode::Normal,
-        KeyCode::Enter => {
-            submit(q);
-            Mode::Normal
+/// Answer a proposal: `run` is `Some((pty, command))` to type `command` into the pane,
+/// `None` to deny it.
+fn answer(
+    backend: &mut dyn Backend,
+    panel: &mut ui::Panel,
+    p: ui::Proposal,
+    run: Option<(&mut dyn Write, String)>,
+) {
+    let reply = match run {
+        Some((pty, cmd)) => {
+            pty_write(pty, format!("{cmd}\r").as_bytes());
+            panel.push(&format!("\n[ran] {cmd}\n"));
+            // shortcut: no output capture until W1's Pane::run; the backend gets a placeholder.
+            ToolReply::Output("(sent to pane; output capture not wired yet)".into())
         }
+        None => {
+            panel.push(&format!("\n[denied] {}\n", p.command));
+            ToolReply::Denied
+        }
+    };
+    if let Err(e) = backend.reply(&p.id, reply) {
+        panel.push(&format!("[error] {e}\n"));
+    }
+}
+
+/// One-line editor for the ask and edit prompts. `Ok` keeps editing; `Err(Some(line))` on
+/// Enter with text, `Err(None)` on Esc or Enter on a blank line.
+fn edit_line(key: KeyEvent, mut q: String) -> Result<String, Option<String>> {
+    match key.code {
+        KeyCode::Esc => Err(None),
+        KeyCode::Enter if q.trim().is_empty() => Err(None),
+        KeyCode::Enter => Err(Some(q)),
         KeyCode::Backspace => {
             q.pop();
-            Mode::Ask(q)
+            Ok(q)
         }
         KeyCode::Char(c) => {
             q.push(c);
-            Mode::Ask(q)
+            Ok(q)
         }
-        _ => Mode::Ask(q),
+        _ => Ok(q),
     }
 }
 

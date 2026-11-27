@@ -7,7 +7,7 @@
 //! the user approves the proposal, Dgent types it into the pane, and hands the
 //! captured output back with [`Backend::reply`].
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::Result;
 
@@ -51,8 +51,11 @@ pub trait Backend: Send {
 }
 
 /// Stand-in backend so the TUI can be exercised without any agent installed.
+/// A prompt `run <cmd>` makes it propose `<cmd>` and finish the turn on [`Backend::reply`].
 #[derive(Default)]
-pub struct EchoBackend;
+pub struct EchoBackend {
+    pending: Option<Sender<Event>>,
+}
 
 impl Backend for EchoBackend {
     fn name(&self) -> &str {
@@ -61,6 +64,14 @@ impl Backend for EchoBackend {
 
     fn ask(&mut self, req: Request) -> Result<Receiver<Event>> {
         let (tx, rx) = mpsc::channel();
+        if let Some(command) = req.prompt.strip_prefix("run ") {
+            tx.send(Event::ProposeCommand {
+                id: "echo-1".into(),
+                command: command.into(),
+            })?;
+            self.pending = Some(tx);
+            return Ok(rx);
+        }
         let lines = req.context.lines().count();
         tx.send(Event::Text(format!(
             "echo: {} ({lines} lines of context)",
@@ -70,7 +81,16 @@ impl Backend for EchoBackend {
         Ok(rx)
     }
 
-    fn reply(&mut self, _id: &str, _reply: ToolReply) -> Result<()> {
+    fn reply(&mut self, _id: &str, reply: ToolReply) -> Result<()> {
+        if let Some(tx) = self.pending.take() {
+            let text = match reply {
+                ToolReply::Denied => "echo: denied".into(),
+                ToolReply::Output(out) => format!("echo: ran ({out})"),
+            };
+            // The UI may have dropped this turn already; nothing to report then.
+            let _ = tx.send(Event::Text(text));
+            let _ = tx.send(Event::Done);
+        }
         Ok(())
     }
 }
@@ -81,7 +101,7 @@ mod tests {
 
     #[test]
     fn echo_streams_text_then_done() {
-        let mut b = EchoBackend;
+        let mut b = EchoBackend::default();
         let rx = b
             .ask(Request {
                 prompt: "hi".into(),
@@ -96,5 +116,26 @@ mod tests {
                 Event::Done
             ]
         );
+    }
+
+    #[test]
+    fn echo_proposes_run_and_finishes_on_reply() {
+        let mut b = EchoBackend::default();
+        let rx = b
+            .ask(Request {
+                prompt: "run echo approved".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Event::ProposeCommand {
+                id: "echo-1".into(),
+                command: "echo approved".into()
+            }
+        );
+        b.reply("echo-1", ToolReply::Denied).unwrap();
+        let rest: Vec<_> = rx.iter().collect();
+        assert_eq!(rest, vec![Event::Text("echo: denied".into()), Event::Done]);
     }
 }
