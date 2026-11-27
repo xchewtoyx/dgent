@@ -32,6 +32,8 @@ screen=$(tmux capture-pane -t "$s" -p)
 grep -qx 'approved' <<<"$screen" || { echo "approved command did not run"; echo "$screen"; exit 1; }
 grep -q 'echo: ran' <<<"$screen" || { echo "backend not told it ran"; echo "$screen"; exit 1; }
 propose 'echo nope'
+tmux send-keys -t "$s" C-y; sleep 0.3  # modified keys must not answer
+tmux capture-pane -t "$s" -p | grep -q 'run? echo nope' || { echo "Ctrl-Y answered the proposal"; exit 1; }
 tmux send-keys -t "$s" n; sleep 0.7
 screen=$(tmux capture-pane -t "$s" -p)
 grep -q 'echo: denied' <<<"$screen" || { echo "deny not reported"; echo "$screen"; exit 1; }

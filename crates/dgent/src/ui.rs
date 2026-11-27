@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -51,20 +51,17 @@ impl Panel {
         f.render_widget(Clear, area);
         f.render_widget(block, area);
 
-        let prompt = match (&self.pending, editing) {
-            (_, Some(cmd)) => Some(Line::from(format!(" edit> {cmd}")).reversed()),
-            (Some(p), None) => Some(Line::from(vec![
-                " run? ".bold(),
-                p.command.clone().into(),
-                "   y run  n deny  e edit".dim(),
-            ])),
-            (None, None) => None,
+        // Wrapped, never truncated: the user must see the whole command they approve.
+        let (prompt, style) = match (&self.pending, editing) {
+            (_, Some(cmd)) => (format!("edit> {cmd}"), Style::default().reversed()),
+            (Some(p), None) => (format!("run? {}", p.command), Style::default().bold()),
+            (None, None) => (String::new(), Style::default()),
         };
-        let [body, ask] = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(prompt.is_some() as u16),
-        ])
-        .areas(inner);
+        let prompt = wrap(&prompt, inner.width as usize);
+        let prompt_h = prompt.len().min(inner.height as usize);
+        let [body, ask] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(prompt_h as u16)])
+                .areas(inner);
 
         let lines = wrap(self.text.trim_end(), body.width as usize);
         let h = body.height as usize;
@@ -75,9 +72,12 @@ impl Panel {
             .map(|l| Line::from(l.as_str()))
             .collect();
         f.render_widget(Paragraph::new(shown), body);
-        if let Some(p) = prompt {
-            f.render_widget(Paragraph::new(p).style(Style::default()), ask);
-        }
+        // shortcut: a command taller than the panel shows only its tail; fine below ~500 chars.
+        let shown: Vec<Line> = prompt[prompt.len() - prompt_h..]
+            .iter()
+            .map(|l| Line::from(l.as_str()))
+            .collect();
+        f.render_widget(Paragraph::new(shown).style(style), ask);
     }
 }
 

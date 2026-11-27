@@ -105,6 +105,10 @@ fn main() -> Result<()> {
                         // One at a time: a newer proposal supersedes (denies) an unanswered one.
                         if let Some(old) = panel.pending.replace(ui::Proposal { id, command }) {
                             answer(&mut *backend, &mut panel, old, None);
+                            // An open edit belonged to the old proposal.
+                            if matches!(mode, Mode::Edit(_)) {
+                                mode = Mode::Normal;
+                            }
                         }
                     }
                     AgentEvent::Error(e) => panel.push(&format!("\n[error] {e}")),
@@ -179,7 +183,14 @@ fn main() -> Result<()> {
                 mode = match std::mem::replace(&mut mode, Mode::Normal) {
                     Mode::Normal if prefix => Mode::Prefix,
                     // While a proposal waits, keys answer it instead of reaching the shell.
+                    // Plain keys only: Ctrl-Y or Alt-N must not answer a proposal by accident.
                     Mode::Normal if panel.pending.is_some() => match key.code {
+                        _ if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            Mode::Normal
+                        }
                         KeyCode::Char('y') => {
                             let p = panel.pending.take().unwrap();
                             let cmd = p.command.clone();
@@ -256,6 +267,8 @@ fn main() -> Result<()> {
             TermEvent::Paste(text) => {
                 if let Mode::Ask(q) | Mode::Edit(q) = &mut mode {
                     q.push_str(&text);
+                } else if panel.pending.is_some() {
+                    // Input is held while a proposal waits; a pasted newline would run a command.
                 } else if parser.screen().bracketed_paste() {
                     pty_write(&mut writer, format!("\x1b[200~{text}\x1b[201~").as_bytes());
                 } else {
