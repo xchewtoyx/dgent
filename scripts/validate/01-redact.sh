@@ -40,7 +40,7 @@ for pair in "${secrets[@]}"; do
 done
 key=$(printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n')
 out=$(printf '%s\n' "$key" | redact)
-grep -q b3BlbnNzaC1rZXktdjEAAAAA <<<"$out" && bad "private key block: $out" || ok "private key block masked whole"
+{ grep -q b3BlbnNzaC1rZXktdjEAAAAA <<<"$out" || ! grep -qF '[REDACTED]' <<<"$out"; } && bad "private key block: $out" || ok "private key block masked whole"
 
 # Ordinary output must come back byte for byte.
 plain=$( { ls -la / 2>/dev/null | head -n 5; git log -3 --format='%h %an %s' 2>/dev/null; env | grep -E '^(PATH|HOME|SHELL)='
