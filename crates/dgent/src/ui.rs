@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthChar;
 
 /// A command the backend wants typed into the pane, awaiting the user's y/n/e.
 pub struct Proposal {
@@ -103,17 +104,23 @@ impl Panel {
     }
 }
 
-/// Hard-wrap each line at `width` chars so scrolling counts screen rows exactly.
-/// shortcut: counts chars, not display width; wide (CJK/emoji) text can overflow a row.
+/// Hard-wrap each line at `width` display columns so scrolling counts screen rows exactly,
+/// and so nothing in a command is clipped off the right edge.
 fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
+    let width = width.max(2); // a wide char needs 2 columns
     let mut out = Vec::new();
     for line in text.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
-            out.push(String::new());
+        let (mut row, mut cols) = (String::new(), 0);
+        for c in line.chars() {
+            let w = c.width().unwrap_or(0);
+            if cols + w > width {
+                out.push(std::mem::take(&mut row));
+                cols = 0;
+            }
+            row.push(c);
+            cols += w;
         }
-        out.extend(chars.chunks(width).map(|c| c.iter().collect()));
+        out.push(row);
     }
     out
 }
@@ -148,5 +155,6 @@ mod tests {
     fn wrap_splits_long_lines_and_keeps_blank_ones() {
         assert_eq!(wrap("abcde\n\nf", 2), ["ab", "cd", "e", "", "f"]);
         assert!(wrap("", 5).is_empty());
+        assert_eq!(wrap("日本語", 4), ["日本", "語"]);
     }
 }
