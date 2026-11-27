@@ -100,6 +100,8 @@ impl ClaudeBackend {
             // Subscription login only: these would take precedence over `claude login`.
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
+            // Without its token, a gateway URL would be sent the subscription OAuth token.
+            .env_remove("ANTHROPIC_BASE_URL")
             .env_remove("CLAUDE_CODE_USE_BEDROCK")
             .env_remove("CLAUDE_CODE_USE_VERTEX")
             .env_remove("CLAUDE_CODE_USE_FOUNDRY")
@@ -113,10 +115,11 @@ impl ClaudeBackend {
         let mut stderr = child.stderr.take().unwrap();
         let turn: Turn = Arc::default();
 
-        let stderr_reader = thread::spawn(move || {
+        let (err_tx, err_rx) = mpsc::channel();
+        thread::spawn(move || {
             let mut s = String::new();
             let _ = stderr.read_to_string(&mut s);
-            s
+            let _ = err_tx.send(s);
         });
 
         let t = turn.clone();
@@ -134,8 +137,12 @@ impl ClaudeBackend {
                     *guard = None;
                 }
             }
-            // stderr closes when claude exits, so this returns once the reason is all in.
-            let why = stderr_reader.join().unwrap_or_default().trim().to_string();
+            // Bounded: a descendant that inherited stderr could keep it open after claude exits.
+            let why = err_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if let Some(tx) = t.lock().unwrap().take() {
                 let _ = tx.send(Event::Error(format!("claude exited: {why}")));
             }
