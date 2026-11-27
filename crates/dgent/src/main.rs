@@ -5,6 +5,9 @@
 //! literal Ctrl-].
 
 mod keys;
+// shortcut: failure/explain paths unused until W2 detection and M2 wiring land.
+#[allow(dead_code)]
+mod overseer;
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver};
@@ -13,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request};
+use dgent_backend::{Backend, EchoBackend, Event as AgentEvent};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -21,8 +24,6 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::PseudoTerminal;
 
-/// How many screen lines go to the backend with a question.
-const CONTEXT_LINES: usize = 40;
 const PANEL_HEIGHT: u16 = 8;
 
 enum Mode {
@@ -65,6 +66,8 @@ fn main() -> Result<()> {
 
     let mut parser = vt100::Parser::new(rows, cols, 10_000);
     let mut backend: Box<dyn Backend> = Box::new(EchoBackend);
+    // shortcut: identity redactor until W3 (dgent-redact) lands; swap in its `redact`.
+    let overseer = overseer::Overseer::new(overseer::Limits::default(), str::to_owned, false);
     let mut turn: Option<Receiver<AgentEvent>> = None;
     let mut panel = String::new();
     let mut mode = Mode::Normal;
@@ -189,9 +192,8 @@ fn main() -> Result<()> {
                         _ => Mode::Normal,
                     },
                     Mode::Ask(q) => ask_key(key, q, |prompt| {
-                        let context = tail(&parser.screen().contents(), CONTEXT_LINES);
                         panel = format!("> {prompt}\n");
-                        match backend.ask(Request { prompt, context }) {
+                        match backend.ask(overseer.ask(&prompt, &parser.screen().contents())) {
                             Ok(rx) => turn = Some(rx),
                             Err(e) => panel.push_str(&format!("[error] {e}")),
                         }
