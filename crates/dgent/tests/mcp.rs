@@ -1,6 +1,7 @@
 //! Plays an MCP client against a real `dgent mcp` process, with a `Listener` as the TUI peer.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use dgent_backend::ToolReply;
@@ -11,6 +12,8 @@ use serde_json::{Value, json};
 fn tool_call_round_trips_through_the_socket() {
     let sock = std::env::temp_dir().join(format!("dgent-test-{}.sock", std::process::id()));
     let listener = Listener::bind(&sock).unwrap();
+    let mode = std::fs::metadata(&sock).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "socket must be owner-only");
     let mut child = Command::new(env!("CARGO_BIN_EXE_dgent"))
         .arg("mcp")
         .env(dgent_mcp::SOCK_ENV, &sock)

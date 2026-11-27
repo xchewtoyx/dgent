@@ -10,10 +10,12 @@
 //! reply `{"output":"..."}` or `{"denied":true}`.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use dgent_backend::ToolReply;
@@ -22,10 +24,12 @@ use serde_json::{Value, json};
 /// The env var `dgent mcp` reads to find the TUI's socket.
 pub const SOCK_ENV: &str = "DGENT_SOCK";
 
-/// `$XDG_RUNTIME_DIR/dgent-<pid>.sock`, or the temp dir when that is unset.
+/// `$XDG_RUNTIME_DIR/dgent-<pid>.sock`, or the temp dir when that is unset or gone
+/// (a long-lived tmux shell can outlive its login's runtime dir).
 pub fn socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
+        .filter(|d| d.is_absolute() && d.is_dir())
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("dgent-{}.sock", std::process::id()))
 }
@@ -65,6 +69,9 @@ impl Listener {
     pub fn bind(path: &Path) -> Result<Self> {
         let _ = std::fs::remove_file(path); // stale socket from a crashed run
         let sock = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
+        // Owner only: read_screen answers without approval, so other accounts must not connect.
+        // shortcut: brief window between bind and chmod; bind inside a private dir if that matters.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         let (tx, calls) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in sock.incoming().flatten() {
@@ -95,6 +102,9 @@ impl Drop for Listener {
 }
 
 fn read_call(stream: UnixStream) -> Option<Call> {
+    // A silent client must not hold a thread forever. Only the request read is bounded:
+    // the reply waits as long as the user takes to decide.
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut line = String::new();
     BufReader::new(stream.try_clone().ok()?)
         .read_line(&mut line)
@@ -111,6 +121,8 @@ fn read_call(stream: UnixStream) -> Option<Call> {
         stream,
     })
 }
+
+const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// `dgent mcp`: a minimal MCP server on `input`/`output` (newline-delimited JSON-RPC).
 /// `sock` is the TUI socket; without one, tools are still listed but calls fail.
@@ -140,7 +152,8 @@ fn handle(msg: &Value, sock: Option<&Path>) -> Option<Value> {
     let params = &msg["params"];
     let result = match msg["method"].as_str().unwrap_or_default() {
         "initialize" => json!({
-            "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+            // Fixed, not echoed: 2025-03-26 requires JSON-RPC batches, which this server lacks.
+            "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "dgent", "version": env!("CARGO_PKG_VERSION") },
         }),
@@ -245,7 +258,7 @@ mod tests {
             "\n",
         ));
         assert_eq!(out.len(), 5, "notification must get no reply: {out:?}");
-        assert_eq!(out[0]["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(out[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
         let names: Vec<_> = out[1]["result"]["tools"]
             .as_array()
             .unwrap()
