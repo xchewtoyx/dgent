@@ -18,6 +18,8 @@ pub struct Panel {
     /// Wrapped lines scrolled up from the bottom; clamped on render.
     scroll: usize,
     pub pending: Option<Proposal>,
+    /// The proposal didn't fit on screen at the last render, so `y` must not run it unseen.
+    pub hidden: bool,
     /// Overseer hint shown as a status-line badge (set by the overseer, W8).
     pub hint: Option<String>,
 }
@@ -82,11 +84,21 @@ impl Panel {
             .map(|l| Line::from(l.as_str()))
             .collect();
         f.render_widget(Paragraph::new(shown), body);
-        // shortcut: a command taller than the whole pane shows only its tail; add prompt scrolling if that bites.
-        let shown: Vec<Line> = prompt[prompt.len() - prompt_h..]
-            .iter()
-            .map(|l| Line::from(l.as_str()))
-            .collect();
+        // Editing keeps the tail (the cursor end) in view; a proposal too tall to show whole
+        // can't be approved. shortcut: no prompt scrolling, add it if huge commands become common.
+        self.hidden = prompt.len() > prompt_h && editing.is_none();
+        let mut shown: Vec<Line> = if self.hidden {
+            prompt[..prompt_h.saturating_sub(1)].iter()
+        } else {
+            prompt[prompt.len() - prompt_h..].iter()
+        }
+        .map(|l| Line::from(l.as_str()))
+        .collect();
+        if self.hidden {
+            shown.push(Line::from(
+                "[too tall to show: enlarge the terminal, or e edit, n deny]",
+            ));
+        }
         f.render_widget(Paragraph::new(shown).style(style), ask);
     }
 }
@@ -108,7 +120,25 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{Panel, Proposal, wrap};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn proposal_taller_than_panel_is_hidden() {
+        let mut term = Terminal::new(TestBackend::new(10, 4)).unwrap();
+        let mut panel = Panel {
+            pending: Some(Proposal {
+                id: "1".into(),
+                command: "x".repeat(100),
+            }),
+            ..Default::default()
+        };
+        term.draw(|f| panel.render(f, f.area(), "t", None)).unwrap();
+        assert!(panel.hidden);
+        panel.pending.as_mut().unwrap().command = "ls".into();
+        term.draw(|f| panel.render(f, f.area(), "t", None)).unwrap();
+        assert!(!panel.hidden);
+    }
 
     #[test]
     fn wrap_splits_long_lines_and_keeps_blank_ones() {

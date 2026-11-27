@@ -192,7 +192,7 @@ fn main() -> Result<()> {
                         {
                             Mode::Normal
                         }
-                        KeyCode::Char('y') => {
+                        KeyCode::Char('y') if !panel.hidden => {
                             let p = panel.pending.take().unwrap();
                             let cmd = p.command.clone();
                             answer(&mut *backend, &mut panel, p, Some((&mut writer, cmd)));
