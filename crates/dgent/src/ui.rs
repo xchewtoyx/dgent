@@ -42,6 +42,22 @@ impl Panel {
         self.scroll = self.scroll.saturating_add_signed(by);
     }
 
+    /// The proposal (or `editing`, the command being edited) wrapped to `width`.
+    /// Wrapped, never truncated: the user must see the whole command they approve.
+    fn prompt(&self, editing: Option<&str>, width: u16) -> (Vec<String>, Style) {
+        let (text, style) = match (&self.pending, editing) {
+            (_, Some(cmd)) => (format!("edit> {cmd}"), Style::default().reversed()),
+            (Some(p), None) => (format!("run? {}", p.command), Style::default().bold()),
+            (None, None) => return (Vec::new(), Style::default()),
+        };
+        (wrap(&text, width as usize), style)
+    }
+
+    /// Rows the prompt needs, so the caller can grow the panel to fit it.
+    pub fn prompt_rows(&self, editing: Option<&str>, width: u16) -> u16 {
+        self.prompt(editing, width).0.len() as u16
+    }
+
     /// `editing` is the command being edited, shown in place of the proposal.
     pub fn render(&mut self, f: &mut Frame, area: Rect, title: &str, editing: Option<&str>) {
         let block = Block::default()
@@ -51,13 +67,7 @@ impl Panel {
         f.render_widget(Clear, area);
         f.render_widget(block, area);
 
-        // Wrapped, never truncated: the user must see the whole command they approve.
-        let (prompt, style) = match (&self.pending, editing) {
-            (_, Some(cmd)) => (format!("edit> {cmd}"), Style::default().reversed()),
-            (Some(p), None) => (format!("run? {}", p.command), Style::default().bold()),
-            (None, None) => (String::new(), Style::default()),
-        };
-        let prompt = wrap(&prompt, inner.width as usize);
+        let (prompt, style) = self.prompt(editing, inner.width);
         let prompt_h = prompt.len().min(inner.height as usize);
         let [body, ask] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(prompt_h as u16)])
@@ -72,7 +82,7 @@ impl Panel {
             .map(|l| Line::from(l.as_str()))
             .collect();
         f.render_widget(Paragraph::new(shown), body);
-        // shortcut: a command taller than the panel shows only its tail; fine below ~500 chars.
+        // shortcut: a command taller than the whole pane shows only its tail; add prompt scrolling if that bites.
         let shown: Vec<Line> = prompt[prompt.len() - prompt_h..]
             .iter()
             .map(|l| Line::from(l.as_str()))

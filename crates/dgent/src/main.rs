@@ -122,10 +122,15 @@ fn main() -> Result<()> {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
         // The panel overlays the bottom of the pane rather than shrinking it: vt100 drops
         // rows on a height decrease, so resizing for the panel would erase shell output.
+        let editing = match &mode {
+            Mode::Edit(cmd) => Some(cmd.as_str()),
+            _ => None,
+        };
+        // The panel grows by the command's rows so the transcript stays readable beside it.
         let panel_h = if !panel.visible() {
             0
         } else {
-            PANEL_HEIGHT.min(pane.height)
+            (PANEL_HEIGHT + panel.prompt_rows(editing, pane.width)).min(pane.height)
         };
         let side = Rect {
             y: pane.bottom() - panel_h,
@@ -145,10 +150,6 @@ fn main() -> Result<()> {
 
         term.draw(|f| {
             f.render_widget(PseudoTerminal::new(parser.screen()), pane);
-            let editing = match &mode {
-                Mode::Edit(cmd) => Some(cmd.as_str()),
-                _ => None,
-            };
             if panel_h > 0 {
                 panel.render(f, side, backend.name(), editing);
             }
