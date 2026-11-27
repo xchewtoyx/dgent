@@ -11,13 +11,14 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::{Backend, Event, Request, ToolReply};
@@ -61,19 +62,22 @@ pub struct CodexBackend {
 
 impl CodexBackend {
     /// Spawn `<codex_bin> app-server` and start one thread (one per pane).
-    pub fn spawn(codex_bin: &str) -> Result<Self> {
-        let mcp = std::env::current_exe().context("locating dgent for its MCP bridge")?;
-        // A JSON string literal is also a valid TOML basic string.
-        let mcp = Value::String(mcp.to_string_lossy().into_owned());
+    /// `dgent_exe` is the binary Codex runs as `<dgent_exe> mcp` for the tool
+    /// bridge; `None` leaves Codex with no tools at all.
+    pub fn spawn(codex_bin: &str, dgent_exe: Option<&Path>) -> Result<Self> {
         let mut cmd = Command::new(codex_bin);
         cmd.arg("app-server");
         for f in DISABLED_FEATURES {
             cmd.args(["--disable", f]);
         }
+        if let Some(exe) = dgent_exe {
+            // A JSON string literal is also a valid TOML basic string.
+            let exe = Value::String(exe.to_string_lossy().into_owned());
+            cmd.arg("-c")
+                .arg(format!("mcp_servers.dgent.command={exe}"))
+                .args(["-c", "mcp_servers.dgent.args=[\"mcp\"]"]);
+        }
         cmd.args(["-c", "forced_login_method=\"chatgpt\""])
-            .arg("-c")
-            .arg(format!("mcp_servers.dgent.command={mcp}"))
-            .args(["-c", "mcp_servers.dgent.args=[\"mcp\"]"])
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
             .stdin(Stdio::piped())
@@ -85,7 +89,14 @@ impl CodexBackend {
             .with_context(|| format!("starting `{codex_bin} app-server`"))?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
-        let mut b = Self::start(stdout, stdin)?;
+        let mut b = match Self::start(stdout, stdin) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
         b.child = Some(child);
         Ok(b)
     }
@@ -169,18 +180,29 @@ impl Backend for CodexBackend {
 
     fn ask(&mut self, req: Request) -> Result<Receiver<Event>> {
         let (tx, rx) = mpsc::channel();
-        self.shared.lock().unwrap().turn = Some(tx.clone());
+        {
+            let mut s = self.shared.lock().unwrap();
+            // One turn at a time, so a late event from an old turn can't reach a new one.
+            if s.turn.is_some() {
+                bail!("codex is still answering the previous question");
+            }
+            s.turn = Some(tx);
+        }
         let text = if req.context.is_empty() {
             req.prompt
         } else {
             format!("{}\n\nTerminal context:\n{}", req.prompt, req.context)
         };
+        let shared = self.shared.clone();
         self.call(
             "turn/start",
             json!({"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}),
             Box::new(move |r| {
                 if let Err(e) = r {
-                    let _ = tx.send(Event::Error(e));
+                    // No turn started, so no turn/completed will end it.
+                    if let Some(tx) = shared.lock().unwrap().turn.take() {
+                        let _ = tx.send(Event::Error(e));
+                    }
                 }
             }),
         )?;
@@ -385,6 +407,8 @@ mod tests {
         server.send(json!({"method": "turn/completed",
             "params": {"threadId": "t1", "turn": {"id": "u1", "status": "completed", "items": []}}}));
 
+        // A second ask while the turn runs is refused.
+        assert!(b.ask(Request::default()).is_err());
         let events: Vec<_> = rx.iter().collect();
         assert_eq!(
             events,
@@ -403,7 +427,13 @@ mod tests {
         let turn = server.recv();
         server
             .send(json!({"id": turn["id"], "error": {"code": -32600, "message": "not logged in"}}));
-        assert_eq!(rx.recv().unwrap(), Event::Error("not logged in".into()));
+        // The server stays up, yet the turn ends and the next ask is allowed.
+        assert_eq!(
+            rx.iter().collect::<Vec<_>>(),
+            vec![Event::Error("not logged in".into())]
+        );
+        b.ask(Request::default()).unwrap();
+        assert_eq!(server.recv()["method"], "turn/start");
     }
 
     #[test]
