@@ -244,7 +244,7 @@ fn enabled_server_names(list: &Value) -> Result<Vec<String>> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|s| s["enabled"] != false && s["name"] != "dgent")
+        .filter(|s| s["enabled"] != false)
         .filter_map(|s| s["name"].as_str().map(str::to_owned))
         .collect())
 }
@@ -258,6 +258,8 @@ fn mcp_override(user: &[String], dgent_exe: Option<&Path>) -> String {
     let q = |s: &str| Value::String(s.to_owned()).to_string();
     let mut entries: Vec<String> = user
         .iter()
+        // A user server named `dgent` is disabled too, unless our bridge replaces it.
+        .filter(|n| !(dgent_exe.is_some() && *n == "dgent"))
         .map(|n| format!("{}={{enabled=false}}", q(n)))
         .collect();
     if let Some(exe) = dgent_exe {
@@ -523,9 +525,19 @@ mod tests {
             {"name": "off", "enabled": false},
             {"name": "dgent", "enabled": true}
         ]);
-        assert_eq!(enabled_server_names(&list).unwrap(), vec!["userdocs"]);
         assert_eq!(
-            mcp_override(&["docs.v2".into()], Some(Path::new("/bin/dgent"))),
+            enabled_server_names(&list).unwrap(),
+            vec!["userdocs", "dgent"]
+        );
+        assert_eq!(
+            mcp_override(&["dgent".into()], None),
+            r#"mcp_servers={"dgent"={enabled=false}}"#
+        );
+        assert_eq!(
+            mcp_override(
+                &["docs.v2".into(), "dgent".into()],
+                Some(Path::new("/bin/dgent"))
+            ),
             r#"mcp_servers={"docs.v2"={enabled=false},dgent={command="/bin/dgent",args=["mcp"]}}"#
         );
         assert_eq!(mcp_override(&[], None), "mcp_servers={}");
