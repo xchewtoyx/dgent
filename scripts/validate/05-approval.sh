@@ -8,7 +8,7 @@ build
 
 step "unit tests and smoke test (approve, deny, edit, Ctrl-Y ignored)"
 check "cargo test -p dgent ui" cargo test -q -p dgent ui
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 step "TUI: approval flow"
 tstart

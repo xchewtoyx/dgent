@@ -8,7 +8,7 @@ build
 
 step "unit tests (budget, rate limit, redaction on every path and before truncation)"
 check "cargo test -p dgent overseer" cargo test -q -p dgent overseer
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 step "redaction is the real one"
 if [ -e crates/dgent-redact ]; then

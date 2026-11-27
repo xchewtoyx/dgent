@@ -9,7 +9,7 @@ step "unit tests (Pane::run gets output and exit code, shrink, non-blocking writ
 check "cargo test -p dgent pane" cargo test -q -p dgent pane
 
 step "smoke test (includes quit after a 2 MB paste into a raw-mode program)"
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 step "TUI: terminal type and shrinking"
 tstart

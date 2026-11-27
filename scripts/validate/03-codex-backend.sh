@@ -15,7 +15,7 @@ if ! command -v "${CODEX_BIN:-codex}" >/dev/null; then
 else
   # Bogus API keys in the env: the backend strips them and forces the ChatGPT login.
   export OPENAI_API_KEY=sk-bogus-dgent-validate CODEX_API_KEY=sk-bogus-dgent-validate
-  if out=$(ask "Reply with exactly the word dgent-ok and nothing else." 2>&1) && grep -q dgent-ok <<<"$out"; then
+  if out=$(ask "What is six times seven? Reply with only the digits." 2>&1) && grep -qx '42' <<<"$out"; then
     ok "answers on the ChatGPT login (bogus OPENAI_API_KEY/CODEX_API_KEY ignored)"
   else
     bad "no answer. If it mentions auth, run: codex login"; sed 's/^/        | /' <<<"$out" | tail -n 8

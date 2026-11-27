@@ -7,7 +7,7 @@ build
 
 step "unit tests"
 check "cargo test -p dgent config" cargo test -q -p dgent config
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 step "bad flags and bad files are errors (no TUI starts)"
 export XDG_CONFIG_HOME=$TMP/cfg
@@ -40,28 +40,22 @@ done
 rm -f "$cf"
 
 step "TUI: real backends (needs the backend rebase and your logins)"
-if grep -q 'ClaudeBackend' crates/dgent/src/*.rs 2>/dev/null; then
-  if command -v claude >/dev/null; then
-    WAIT=90
-    tstart "$TMP/bash" --backend claude
-    task 'Reply with exactly the word dgent-ok.' 1
-    texpect 'dgent-ok' "--backend claude answers from your claude login"
+for pair in claude:ClaudeBackend:claude.rs codex:CodexBackend:codex.rs; do
+  IFS=: read -r b type file <<<"$pair"
+  if [ ! -e "crates/dgent-backend/src/$file" ]; then
+    skip "--backend $b: its backend PR isn't merged"
+  elif ! grep -q "$type" crates/dgent/src/*.rs; then
+    bad "--backend $b still falls back to echo; its backend is merged, so the config rebase should build $type"
+  elif ! command -v "$b" >/dev/null; then
+    skip "--backend $b: $b not on PATH"
+  else
+    tstart "$TMP/bash" --backend "$b"
+    task 'What is six times seven? Reply with only the digits.' 1
+    # The question has no "42" in it, so a match is the backend's answer.
+    WAIT=90 texpect '(^|[^0-9])42([^0-9]|$)' "--backend $b answers from your $b login"
     tquit
-  else skip "claude not on PATH"; fi
-else
-  skip "--backend claude still falls back to echo (rebase onto PR #5 not done)"
-fi
-if grep -q 'CodexBackend' crates/dgent/src/*.rs 2>/dev/null; then
-  if command -v codex >/dev/null; then
-    WAIT=90
-    tstart "$TMP/bash" --backend codex
-    task 'Reply with exactly the word dgent-ok.' 1
-    texpect 'dgent-ok' "--backend codex answers from your codex login"
-    tquit
-  else skip "codex not on PATH"; fi
-else
-  skip "--backend codex still falls back to echo (rebase onto PR #10 not done)"
-fi
+  fi
+done
 
 manual "Put backend = \"codex\" in ~/.config/dgent/config.toml, start dgent with no flags: it uses Codex. Then dgent --backend claude: Claude wins over the file."
 finish

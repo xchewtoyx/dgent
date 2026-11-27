@@ -9,7 +9,7 @@ build
 step "unit and integration tests"
 check "cargo test -p dgent-mcp" cargo test -q -p dgent-mcp
 check "cargo test -p dgent --test mcp (real dgent mcp process round-trip)" cargo test -q -p dgent --test mcp
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
 INITED='{"jsonrpc":"2.0","method":"notifications/initialized"}'

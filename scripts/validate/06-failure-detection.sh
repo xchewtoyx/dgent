@@ -8,7 +8,7 @@ build
 
 step "unit tests over recorded bash, zsh and ssh sessions; smoke test"
 check "cargo test -p dgent observe" cargo test -q -p dgent observe
-check "scripts/smoke.sh" ./scripts/smoke.sh "$BIN"
+smoke
 
 step "TUI: local bash"
 tstart

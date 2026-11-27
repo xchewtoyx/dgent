@@ -15,7 +15,8 @@ SSH_HOST=${DGENT_SSH_HOST:-}
 
 step()   { printf '\n== %s\n' "$*"; }
 ok()     { echo "  PASS  $*"; PASS=$((PASS + 1)); }
-bad()    { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
+# With DGENT_KEEP=1 the first failure stops the script, so its tmux session is the one kept.
+bad()    { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); [ "${DGENT_KEEP:-}" = 1 ] && finish; }
 skip()   { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 manual() { MANUAL+=("$*"); }
 
@@ -32,7 +33,7 @@ trap cleanup EXIT
 # check "description" cmd args...: PASS if the command succeeds, else FAIL with its output tail.
 check() {
   local desc=$1; shift
-  if "$@" >"$TMP/out" 2>&1; then ok "$desc"; else bad "$desc"; tail -n 15 "$TMP/out" | sed 's/^/        | /'; fi
+  if "$@" >"$TMP/out" 2>&1; then ok "$desc"; else tail -n 15 "$TMP/out" | sed 's/^/        | /'; bad "$desc"; fi
 }
 
 # need PATH "PR #n": stop with a SKIP when that PR's code isn't on this checkout yet.
@@ -60,9 +61,14 @@ build() {
   DGENT_ARGS=""
   [ -e crates/dgent/src/config.rs ] && DGENT_ARGS="--backend echo"
   # A predictable shell: no rc files, prompt "$ ". Your own rc files get the manual checks.
-  printf '#!/bin/sh\nPS1="$ " exec bash --norc --noprofile -i\n' >"$TMP/bash"
+  # HISTFILE=/dev/null: never touch your saved history.
+  printf '#!/bin/sh\nHISTFILE=/dev/null PS1="$ " exec bash --norc --noprofile -i\n' >"$TMP/bash"
   chmod +x "$TMP/bash"
+  # scripts/smoke.sh expects echo replies; once config is in, point it at echo explicitly.
+  printf '#!/bin/sh\nexec %q %s "$@"\n' "$BIN" "$DGENT_ARGS" >"$TMP/dgent-echo"
+  chmod +x "$TMP/dgent-echo"
 }
+smoke() { check "scripts/smoke.sh" ./scripts/smoke.sh "$TMP/dgent-echo"; }
 
 # --- tmux: drive the TUI the way scripts/smoke.sh does ---------------------------------------
 
@@ -70,7 +76,10 @@ build() {
 tstart() {
   local sh=${1:-$TMP/bash}; shift || true
   tmux kill-session -t "$S" 2>/dev/null
-  tmux new-session -d -s "$S" -x "${COLS:-120}" -y "${ROWS:-35}" \
+  # An already-running tmux server has its own env; pass the config dir through explicitly.
+  local env=()
+  [ -n "${XDG_CONFIG_HOME:-}" ] && env=(-e "XDG_CONFIG_HOME=$XDG_CONFIG_HOME")
+  tmux new-session -d "${env[@]}" -s "$S" -x "${COLS:-120}" -y "${ROWS:-35}" \
     "SHELL=$sh $BIN ${*:-$DGENT_ARGS}; echo DGENT-EXIT=\$?; sleep 30"
   sleep 1.5
 }
@@ -90,15 +99,15 @@ texpect() {
     "${VIEW:-tscreen}" | grep -qE -- "$1" && { ok "$2"; return 0; }
     sleep 0.2
   done
-  bad "$2 (screen never matched /$1/)"
   tscreen | grep -v '^$' | tail -n 12 | sed 's/^/        | /'
+  bad "$2 (screen never matched /$1/)"
   return 1
 }
 
 # tabsent REGEX "description": PASS if the screen does not match right now.
 tabsent() {
   if "${VIEW:-tscreen}" | grep -qE -- "$1"; then
-    bad "$2 (screen matched /$1/)"; tscreen | grep -v '^$' | tail -n 12 | sed 's/^/        | /'; return 1
+    tscreen | grep -v '^$' | tail -n 12 | sed 's/^/        | /'; bad "$2 (screen matched /$1/)"; return 1
   fi
   ok "$2"
 }
@@ -114,5 +123,5 @@ have_ssh() {
 
 # tssh: inside the running dgent, ssh to $SSH_HOST and get a predictable remote bash, prompt "r$ ".
 tssh() {
-  ttype "ssh -o BatchMode=yes -t $SSH_HOST \"PS1='r\\\$ ' exec bash --norc --noprofile -i\"" 2.5
+  ttype "ssh -o BatchMode=yes -t $SSH_HOST \"HISTFILE=/dev/null PS1='r\\\$ ' exec bash --norc --noprofile -i\"" 2.5
 }
