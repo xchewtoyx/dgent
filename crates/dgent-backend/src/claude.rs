@@ -71,12 +71,17 @@ impl ClaudeConfig {
 }
 
 type Turn = Arc<Mutex<Option<Sender<Event>>>>;
+/// Set once the process can no longer take turns; `ask` returns it as the error.
+type Dead = Arc<Mutex<Option<String>>>;
+
+const NOT_SUBSCRIPTION: &str = "claude is not using your subscription login";
 type ReplySink = Box<dyn FnMut(&str, ToolReply) -> Result<()> + Send>;
 
 pub struct ClaudeBackend {
     child: Child,
     stdin: ChildStdin,
     turn: Turn,
+    dead: Dead,
     reply_sink: Option<ReplySink>,
 }
 
@@ -122,19 +127,29 @@ impl ClaudeBackend {
             let _ = err_tx.send(s);
         });
 
-        let t = turn.clone();
+        let dead: Dead = Arc::default();
+        let (t, d) = (turn.clone(), dead.clone());
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Some(ev) = parse_line(&line) else {
                     continue;
                 };
                 let end = matches!(ev, Event::Done | Event::Error(_));
+                // Stop reading: the rest of this turn must not leak into a later one.
+                if let Event::Error(e) = &ev
+                    && e.starts_with(NOT_SUBSCRIPTION)
+                {
+                    *d.lock().unwrap() = Some(e.clone());
+                }
                 let mut guard = t.lock().unwrap();
                 if let Some(tx) = guard.as_ref() {
                     let _ = tx.send(ev);
                 }
                 if end {
                     *guard = None;
+                }
+                if d.lock().unwrap().is_some() {
+                    return;
                 }
             }
             // Bounded: a descendant that inherited stderr could keep it open after claude exits.
@@ -143,8 +158,10 @@ impl ClaudeBackend {
                 .unwrap_or_default()
                 .trim()
                 .to_string();
+            let msg = format!("claude exited: {why}");
+            *d.lock().unwrap() = Some(msg.clone());
             if let Some(tx) = t.lock().unwrap().take() {
-                let _ = tx.send(Event::Error(format!("claude exited: {why}")));
+                let _ = tx.send(Event::Error(msg));
             }
         });
 
@@ -152,6 +169,7 @@ impl ClaudeBackend {
             child,
             stdin,
             turn,
+            dead,
             reply_sink: None,
         })
     }
@@ -179,6 +197,9 @@ impl Backend for ClaudeBackend {
     }
 
     fn ask(&mut self, req: Request) -> Result<Receiver<Event>> {
+        if let Some(e) = &*self.dead.lock().unwrap() {
+            bail!("{e}");
+        }
         let (tx, rx) = mpsc::channel();
         {
             let mut turn = self.turn.lock().unwrap();
@@ -224,13 +245,12 @@ fn parse_line(line: &str) -> Option<Event> {
             v["event"]["delta"]["text"].as_str()?.to_string(),
         )),
         // Backstop for credentials set in ~/.claude settings: "none" means the subscription login.
-        // shortcut: the turn keeps running in claude after this error; restart the backend if it fires.
         "system"
             if v["subtype"] == "init"
                 && !matches!(v["apiKeySource"].as_str(), None | Some("none")) =>
         {
             Some(Event::Error(format!(
-                "claude is using {} instead of your subscription login",
+                "{NOT_SUBSCRIPTION} (apiKeySource {})",
                 v["apiKeySource"]
             )))
         }
@@ -341,6 +361,42 @@ mod tests {
             matches!(&events[..], [Event::Error(e)] if e.contains("boom")),
             "{events:?}"
         );
+        assert!(b.ask(Request::default()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn non_subscription_auth_ends_the_backend() {
+        let dir =
+            std::env::temp_dir().join(format!("dgent-fake-claude-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude_hello.jsonl"
+        );
+        let script = dir.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nread line\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"ANTHROPIC_API_KEY\"}}'\ncat '{fixture}'\nsleep 5\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut b = ClaudeBackend::spawn(&ClaudeConfig {
+            program: script.to_string_lossy().into(),
+            mcp_command: None,
+        })
+        .unwrap();
+        let events: Vec<_> = b.ask(Request::default()).unwrap().iter().collect();
+        assert!(
+            matches!(&events[..], [Event::Error(e)] if e.starts_with(NOT_SUBSCRIPTION)),
+            "{events:?}"
+        );
+        // The rest of that turn ("hello there", Done) must never reach a later turn.
+        let err = b.ask(Request::default()).unwrap_err().to_string();
+        assert!(err.starts_with(NOT_SUBSCRIPTION), "{err}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
