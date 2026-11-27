@@ -19,12 +19,12 @@ use std::ops::Range;
 /// `PROMPT_COMMAND` still sees it (`&& :` so `set -e` doesn't exit on it). `$_dg_on` makes a
 /// second `C-] i` a no-op. zsh's branch is under `eval` so sh/dash can parse the line.
 pub const INJECT: &str = concat!(
-    r#" if [ -n "$_dg_on" ]; then :; elif [ -n "$ZSH_VERSION" ]; then _dg_on=1; eval '_dg_pre(){ printf "\033]133;D;%s\007\033]133;A\007" $?; }; "#,
-    r#"_dg_exe(){ printf "\033]133;C\007"; }; precmd_functions=(_dg_pre $precmd_functions); "#,
+    r#" if [ -n "${_dg_on-}" ]; then :; elif [ -n "${ZSH_VERSION-}" ]; then _dg_on=1; eval '_dg_pre(){ printf "\033]133;D;%s\007\033]133;A\007" $?; }; "#,
+    r#"_dg_exe(){ printf "\033]133;C\007"; }; precmd_functions=(_dg_pre ${precmd_functions-}); "#,
     r#"preexec_functions+=(_dg_exe); PS1="$PS1%{$(printf "\033]133;B\007")%}"'; "#,
-    r#"elif [ -n "$BASH_VERSION" ]; then _dg_on=1; "#,
+    r#"elif [ -n "${BASH_VERSION-}" ]; then _dg_on=1; "#,
     r#"PROMPT_COMMAND='_dg_s=$?; printf "\033]133;D;%s\007\033]133;A\007" $_dg_s; (exit $_dg_s) && :'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; "#,
-    r#"PS0='\033]133;C\007'"$PS0"; PS1="$PS1"'\[\033]133;B\007\]'; "#,
+    r#"PS0='\033]133;C\007'"${PS0-}"; PS1="$PS1"'\[\033]133;B\007\]'; "#,
     r#"else echo 'dgent: command marks need bash or zsh'; fi"#,
     "\r"
 );
@@ -58,7 +58,8 @@ const ERROR_PATTERNS: [&str; 12] = [
 pub struct CommandFinished {
     /// The command line as echoed, escapes stripped.
     pub cmd: String,
-    /// Absolute byte offsets of the command's output in the PTY stream.
+    /// Absolute byte offsets of the command's output in the PTY stream. Without a `C` mark
+    /// (bash < 4.4) it starts at `B`, so it includes the echoed command line.
     pub output_range: Range<u64>,
     /// The output as text, escapes stripped, at most the last `OUTPUT_CAP` bytes.
     pub output: String,
