@@ -207,10 +207,11 @@ fn osc_end(buf: &[u8], from: usize) -> Option<usize> {
 
 /// Turn captured bytes into a `Capture`. With `need_end`, returns None until a complete
 /// OSC 133;D mark has arrived; otherwise takes everything as output with an unknown exit.
+/// A command that prints a D mark itself can fake its end and exit code (inherent to OSC 133).
 fn parse_capture(buf: &[u8], need_end: bool) -> Option<Capture> {
-    let (body, exit) = match find(buf, b"\x1b]133;D") {
-        Some(d) => {
-            let end = osc_end(buf, d + 7)?;
+    let mark = find(buf, b"\x1b]133;D").and_then(|d| Some((d, osc_end(buf, d + 7)?)));
+    let (body, exit) = match mark {
+        Some((d, end)) => {
             let params = String::from_utf8_lossy(&buf[d + 7..end]);
             let exit = params
                 .trim_start_matches(';')
@@ -278,6 +279,9 @@ mod tests {
         let c = parse_capture(b"ls\r\na\r\n\x1b]133;D;0\x1b\\$ ", true).unwrap();
         assert_eq!((c.output.as_str(), c.exit), ("a\n", Some(0)));
         assert!(parse_capture(b"ls\r\na\r\n\x1b]133;D;0", true).is_none());
+        // A mark cut off at the quiet timeout still yields a capture, with unknown exit.
+        let c = parse_capture(b"ls\r\na\r\n\x1b]133;D;0", false).unwrap();
+        assert_eq!(c.exit, None);
         let c = parse_capture(b"ls\r\na\r\n$ ", false).unwrap();
         assert_eq!((c.output.as_str(), c.exit), ("a\n$ ", None));
     }

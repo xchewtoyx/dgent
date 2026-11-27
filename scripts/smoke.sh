@@ -27,8 +27,8 @@ for setup in 'paste' 'exec sleep 30 >/dev/null'; do
   sleep 1.5
   if [ "$setup" = paste ]; then
     tmux send-keys -t "$s" 'stty raw -echo; sleep 30' Enter; sleep 0.3
-    head -c 2000000 /dev/zero | tr '\0' x | tmux load-buffer -b dgent-smoke -
-    tmux paste-buffer -p -d -b dgent-smoke -t "$s"; sleep 0.5
+    head -c 2000000 /dev/zero | tr '\0' x | tmux load-buffer -b "$s" -
+    tmux paste-buffer -p -d -b "$s" -t "$s"; sleep 0.5
   else
     tmux send-keys -t "$s" "$setup" Enter; sleep 0.5
   fi
