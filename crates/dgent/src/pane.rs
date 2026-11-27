@@ -15,7 +15,7 @@ use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native
 /// fall back to screen's, and Home/End are sent as screen's `ESC[1~`/`ESC[4~` (see keys.rs).
 pub const TERM: &str = "screen-256color";
 const SCROLLBACK: usize = 10_000;
-/// `run` gives up waiting for an end-of-command mark after this long without output.
+/// For shells that emit no OSC 133 marks, `run` treats this long without output as the end.
 const QUIET: Duration = Duration::from_secs(1);
 /// Hard cap for `run`, for commands that never go quiet (e.g. `yes`).
 const MAX_RUN: Duration = Duration::from_secs(30);
@@ -28,6 +28,8 @@ pub struct Pane {
     in_tx: Sender<Vec<u8>>,
     /// Raw output since `run` typed its command, while a capture is active.
     capture: Option<Vec<u8>>,
+    /// Whether the shell has emitted an OSC 133;D mark, so `run` can wait for one.
+    marks: bool,
 }
 
 /// What a command printed, and its exit code when the shell emits OSC 133 marks.
@@ -82,6 +84,7 @@ impl Pane {
             out_rx,
             in_tx,
             capture: None,
+            marks: false,
         })
     }
 
@@ -102,6 +105,8 @@ impl Pane {
             match self.out_rx.try_recv() {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
+                    // shortcut: misses a mark split across reads; the next prompt catches it.
+                    self.marks |= find(&bytes, b"\x1b]133;D").is_some();
                     if let Some(c) = &mut self.capture {
                         c.extend_from_slice(&bytes);
                     }
@@ -141,8 +146,9 @@ impl Pane {
         let _ = self.child.kill();
     }
 
-    /// Type `cmd` and collect its output until the shell's OSC 133;D end-of-command mark, or
-    /// until output goes quiet (then `exit` is None). Blocks the caller.
+    /// Type `cmd` and collect its output until the shell's OSC 133;D end-of-command mark, or,
+    /// for a shell that has never sent one, until output goes quiet (then `exit` is None).
+    /// Capped at `MAX_RUN`. Blocks the caller.
     #[allow(dead_code)] // called by approved agent commands once W7 lands
     pub fn run(&mut self, cmd: &str) -> Capture {
         // Let the previous prompt (and its own D mark) arrive before capturing.
@@ -162,7 +168,7 @@ impl Pane {
                 self.capture = None;
                 return c;
             }
-            if last.elapsed() > QUIET || start.elapsed() > MAX_RUN {
+            if (!self.marks && last.elapsed() > QUIET) || start.elapsed() > MAX_RUN {
                 let buf = self.capture.take().unwrap_or_default();
                 return parse_capture(&buf, false).expect("unfinished capture always parses");
             }
@@ -299,6 +305,9 @@ mod tests {
         let mut p = sh("\x1b]133;D;$?\x07$ ");
         let c = p.run("echo hi; false");
         assert_eq!((c.output.trim(), c.exit), ("hi", Some(1)));
+        // With marks, a silent pause longer than QUIET doesn't end the capture.
+        let c = p.run("sleep 1.5; echo done");
+        assert_eq!((c.output.trim(), c.exit), ("done", Some(0)));
         p.kill();
     }
 
