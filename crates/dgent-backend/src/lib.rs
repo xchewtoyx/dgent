@@ -7,6 +7,9 @@
 //! the user approves the proposal, Dgent types it into the pane, and hands the
 //! captured output back with [`Backend::reply`].
 
+mod codex;
+pub use codex::CodexBackend;
+
 use std::sync::mpsc::{self, Receiver};
 
 use anyhow::Result;
