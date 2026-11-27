@@ -24,7 +24,7 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         // password=..., API_KEY: ..., "client_secret": "..."; same line only.
         // Only double-quoted keys, so `ls: cannot access 'secret': ...` is left alone.
         (
-            r#"(?i)((?:"[a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key)[a-z0-9_.-]*"|\b[a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key)[a-z0-9_.-]*)[ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|[^\s"']+)"#,
+            r#"(?i)((?:"[a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key)[a-z0-9_.-]*"|\b[a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key)[a-z0-9_.-]*)[ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|(?:[^\s"']|"[^"\n]*"|'[^'\n]*')+)"#,
             format!("${{1}}{MASK}"),
         ),
     ]
@@ -90,6 +90,10 @@ mod tests {
                 // Punctuation can be part of the secret (printenv), so mask to whitespace.
                 "DB_PASSWORD=&violet7 X_TOKEN=cedar&vi;ol|et API_KEY=example; next",
                 "DB_PASSWORD=[REDACTED] X_TOKEN=[REDACTED] API_KEY=[REDACTED] next",
+            ),
+            (
+                r#"API_KEY=example;TOKEN="sample value" next"#,
+                "API_KEY=[REDACTED] next",
             ),
         ];
         for (input, want) in cases {
