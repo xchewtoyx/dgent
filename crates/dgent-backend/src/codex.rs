@@ -70,6 +70,12 @@ impl CodexBackend {
         for f in DISABLED_FEATURES {
             cmd.args(["--disable", f]);
         }
+        // The user's own MCP servers could act outside the pane. An inline
+        // `mcp_servers={}` merges rather than replaces, so disable each by name.
+        for name in user_mcp_servers(codex_bin)? {
+            cmd.arg("-c")
+                .arg(format!("mcp_servers.{name}.enabled=false"));
+        }
         if let Some(exe) = dgent_exe {
             // A JSON string literal is also a valid TOML basic string.
             let exe = Value::String(exe.to_string_lossy().into_owned());
@@ -222,6 +228,38 @@ impl Drop for CodexBackend {
             let _ = c.wait();
         }
     }
+}
+
+/// Enabled MCP servers in the user's Codex config, from `codex mcp list --json`.
+fn user_mcp_servers(codex_bin: &str) -> Result<Vec<String>> {
+    let out = Command::new(codex_bin)
+        .args(["mcp", "list", "--json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("running `{codex_bin} mcp list`"))?;
+    anyhow::ensure!(out.status.success(), "`{codex_bin} mcp list` failed");
+    enabled_server_names(&serde_json::from_slice(&out.stdout)?)
+}
+
+fn enabled_server_names(list: &Value) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for s in list.as_array().into_iter().flatten() {
+        let name = s["name"].as_str().unwrap_or_default();
+        if s["enabled"] == false || name == "dgent" {
+            continue;
+        }
+        // Fail closed on a name that can't be a bare dotted-key segment.
+        anyhow::ensure!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "can't disable Codex MCP server {name:?}"
+        );
+        names.push(name.to_owned());
+    }
+    Ok(names)
 }
 
 fn read_loop(reader: impl Read, writer: &Writer, shared: &Mutex<Shared>) {
@@ -387,6 +425,8 @@ mod tests {
         let text = turn["params"]["input"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("why is disk full") && text.ends_with("$ df -h"));
         server.send(json!({"id": turn["id"], "result": {"turn": {"id": "u1", "status": "inProgress", "items": []}}}));
+        // A second ask while the turn runs is refused.
+        assert!(b.ask(Request::default()).is_err());
 
         server.send(
             json!({"id": 7, "method": "item/commandExecution/requestApproval",
@@ -407,8 +447,6 @@ mod tests {
         server.send(json!({"method": "turn/completed",
             "params": {"threadId": "t1", "turn": {"id": "u1", "status": "completed", "items": []}}}));
 
-        // A second ask while the turn runs is refused.
-        assert!(b.ask(Request::default()).is_err());
         let events: Vec<_> = rx.iter().collect();
         assert_eq!(
             events,
@@ -459,6 +497,18 @@ mod tests {
             notification_event("turn/completed", &failed),
             Some(Event::Error("usage limit reached".into()))
         );
+    }
+
+    #[test]
+    fn lists_user_mcp_servers_to_disable() {
+        // Shape from `codex mcp list --json`, codex-cli 0.172.0.
+        let list = json!([
+            {"name": "userdocs", "enabled": true, "transport": {"type": "stdio", "command": "/bin/true"}},
+            {"name": "off", "enabled": false},
+            {"name": "dgent", "enabled": true}
+        ]);
+        assert_eq!(enabled_server_names(&list).unwrap(), vec!["userdocs"]);
+        assert!(enabled_server_names(&json!([{"name": "a.b", "enabled": true}])).is_err());
     }
 
     #[test]
