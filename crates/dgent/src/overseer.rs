@@ -90,9 +90,11 @@ impl Overseer {
     pub fn explain_last(&self) -> Option<Request> {
         let f = self.last_failure.as_ref()?;
         // The command goes in the prompt so a long output tail can't push it out of the budget.
+        // Redact before capping, as in `build`; a pasted heredoc shouldn't blow the budget.
+        let command = truncate(&(self.redact)(&f.command), 5, 512);
         let prompt = format!(
-            "`{}` exited with status {}. Briefly explain why and suggest a fix. Its output follows.",
-            f.command, f.exit
+            "`{command}` exited with status {}. Briefly explain why and suggest a fix. Its output follows.",
+            f.exit
         );
         Some(self.build(&prompt, &f.output))
     }
@@ -212,6 +214,15 @@ mod tests {
         let req = o.explain_last().unwrap();
         assert!(req.prompt.contains("`make` exited with status 2"));
         assert_eq!(req.context, "oops");
+
+        o.on_failure(
+            Failure {
+                command: "y".repeat(10_000),
+                ..fail("")
+            },
+            Instant::now(),
+        );
+        assert!(o.explain_last().unwrap().prompt.len() < 1024);
     }
 
     #[test]
