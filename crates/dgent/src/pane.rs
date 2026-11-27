@@ -120,7 +120,8 @@ impl Pane {
         let (cur, _) = screen.cursor_position();
         // vt100 drops the bottom rows on a height decrease. Like xterm, scroll the main screen
         // up first so the cursor line stays visible and the top rows go to scrollback.
-        // Full-screen apps on the alternate screen redraw on SIGWINCH, so they're left alone.
+        // Full-screen apps on the alternate screen redraw on SIGWINCH; the shell rows hidden
+        // behind them are still truncated (shortcut: vt100 only lets us scroll the active grid).
         // Narrowing still truncates each row (no reflow).
         if !screen.alternate_screen() && cur >= rows {
             let n = cur + 1 - rows;
@@ -145,7 +146,7 @@ impl Pane {
     #[allow(dead_code)] // called by approved agent commands once W7 lands
     pub fn run(&mut self, cmd: &str) -> Capture {
         // Let the previous prompt (and its own D mark) arrive before capturing.
-        self.wait_quiet(Duration::from_millis(100), MAX_RUN);
+        self.wait_quiet(Duration::from_millis(100), Duration::from_secs(2));
         self.capture = Some(Vec::new());
         self.write(format!("{cmd}\r").as_bytes());
         let start = Instant::now();
