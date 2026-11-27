@@ -131,14 +131,12 @@ impl ClaudeBackend {
         let (t, d) = (turn.clone(), dead.clone());
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let Some(ev) = parse_line(&line) else {
+                let Some((ev, fatal)) = parse(&line) else {
                     continue;
                 };
                 let end = matches!(ev, Event::Done | Event::Error(_));
                 // Stop reading: the rest of this turn must not leak into a later one.
-                if let Event::Error(e) = &ev
-                    && e.starts_with(NOT_SUBSCRIPTION)
-                {
+                if fatal && let Event::Error(e) = &ev {
                     *d.lock().unwrap() = Some(e.clone());
                 }
                 let mut guard = t.lock().unwrap();
@@ -236,23 +234,27 @@ fn user_message(req: &Request) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
 }
 
-/// Map one stream-json line to an event. Full `assistant` messages are ignored
+/// Map one stream-json line to an event, and whether it ends the backend. Full `assistant` messages are ignored
 /// because their text already arrived as `text_delta`s.
-fn parse_line(line: &str) -> Option<Event> {
+fn parse(line: &str) -> Option<(Event, bool)> {
     let v: Value = serde_json::from_str(line).ok()?;
     match v["type"].as_str()? {
-        "stream_event" if v["event"]["delta"]["type"] == "text_delta" => Some(Event::Text(
-            v["event"]["delta"]["text"].as_str()?.to_string(),
+        "stream_event" if v["event"]["delta"]["type"] == "text_delta" => Some((
+            Event::Text(v["event"]["delta"]["text"].as_str()?.to_string()),
+            false,
         )),
         // Backstop for credentials set in ~/.claude settings: "none" means the subscription login.
         "system"
             if v["subtype"] == "init"
                 && !matches!(v["apiKeySource"].as_str(), None | Some("none")) =>
         {
-            Some(Event::Error(format!(
-                "{NOT_SUBSCRIPTION} (apiKeySource {})",
-                v["apiKeySource"]
-            )))
+            Some((
+                Event::Error(format!(
+                    "{NOT_SUBSCRIPTION} (apiKeySource {})",
+                    v["apiKeySource"]
+                )),
+                true,
+            ))
         }
         "result" if v["is_error"] == true => {
             let errors: Vec<&str> = v["errors"]
@@ -266,9 +268,9 @@ fn parse_line(line: &str) -> Option<Event> {
                 _ if !errors.is_empty() => errors.join("; "),
                 _ => v["subtype"].as_str().unwrap_or("claude error").to_string(),
             };
-            Some(Event::Error(msg))
+            Some((Event::Error(msg), false))
         }
-        "result" => Some(Event::Done),
+        "result" => Some((Event::Done, false)),
         _ => None,
     }
 }
@@ -276,6 +278,10 @@ fn parse_line(line: &str) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_line(line: &str) -> Option<Event> {
+        parse(line).map(|(ev, _)| ev)
+    }
 
     fn parse_fixture(s: &str) -> Vec<Event> {
         s.lines().filter_map(parse_line).collect()
@@ -450,5 +456,8 @@ mod tests {
             parse_line(r#"{"type":"system","subtype":"init","apiKeySource":"apiKeyHelper"}"#),
             Some(Event::Error(e)) if e.contains("apiKeyHelper")
         ));
+        // A failed turn whose text happens to match must not end the backend.
+        let spoof = format!(r#"{{"type":"result","is_error":true,"result":"{NOT_SUBSCRIPTION}"}}"#);
+        assert!(matches!(parse(&spoof), Some((Event::Error(_), false))));
     }
 }
