@@ -146,7 +146,15 @@ impl CodexBackend {
         let id = self.next_id;
         self.next_id += 1;
         self.shared.lock().unwrap().pending.insert(id, on_response);
-        self.send(&json!({"id": id, "method": method, "params": params}))
+        let sent = self.send(&json!({"id": id, "method": method, "params": params}));
+        if let Err(e) = &sent {
+            // No response will come, so settle the request now (this also frees the turn slot).
+            let cb = self.shared.lock().unwrap().pending.remove(&id);
+            if let Some(cb) = cb {
+                cb(Err(format!("writing to codex app-server: {e}")));
+            }
+        }
+        sent
     }
 
     fn call_wait(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -469,6 +477,17 @@ mod tests {
         );
         b.ask(Request::default()).unwrap();
         assert_eq!(server.recv()["method"], "turn/start");
+    }
+
+    #[test]
+    fn failed_write_frees_the_turn() {
+        let (mut b, server) = connect();
+        // Keep the server's write end open so only our writes fail.
+        let Server { rx, tx: _tx } = server;
+        drop(rx);
+        assert!(b.ask(Request::default()).is_err());
+        let again = b.ask(Request::default()).unwrap_err().to_string();
+        assert!(!again.contains("still answering"), "{again}");
     }
 
     #[test]
