@@ -28,6 +28,10 @@ pub const INJECT: &str = concat!(
     "\r"
 );
 
+/// Bytes of output after `C-] i` within which its `D` is expected: the echoed line
+/// (a few hundred bytes, more with line-editor redraws) plus the mark itself.
+const INJECT_WINDOW: u64 = 4096;
+
 /// Output kept per command: the last this many bytes.
 const OUTPUT_CAP: usize = 16 * 1024;
 
@@ -120,7 +124,8 @@ pub struct Observer {
     mark: Mark,
     cmd: String,
     guess: Guess,
-    injected: bool,
+    /// Stream offset until which a `D` is taken as the injected line's own (see `injected`).
+    injected: Option<u64>,
 }
 
 impl Observer {
@@ -140,8 +145,10 @@ impl Observer {
 
     /// Call after typing [`INJECT`]. Its first `D` comes from the shell that was just
     /// marked, which may be inside a marked command (ssh): that `D` must not end the outer one.
+    /// If no `D` arrives soon (a shell without marks, or `C-] i` pressed inside an editor),
+    /// the expectation lapses so it can't swallow a later command's `D`.
     pub fn injected(&mut self) {
-        self.injected = true;
+        self.injected = Some(self.pos + INJECT_WINDOW);
     }
 
     /// Call when output has paused. A paused line that ends like a prompt is taken as one.
@@ -275,7 +282,7 @@ impl Observer {
                 let end = self.esc_start;
                 let mark = std::mem::replace(&mut self.mark, Mark::Prompt);
                 match mark {
-                    _ if std::mem::take(&mut self.injected) => {}
+                    _ if self.injected.take().is_some_and(|until| self.pos <= until) => {}
                     Mark::Output { start } => {
                         let cmd = std::mem::take(&mut self.cmd);
                         self.emit(done, cmd, start..end, exit);
@@ -481,6 +488,18 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn injection_without_a_mark_lapses() {
+        let mut o = Observer::new();
+        o.feed(b"\x1b]133;B\x07vim\r\n\x1b]133;C\x07");
+        // C-] i typed into vim: no D follows, the editor just redraws.
+        o.injected();
+        o.feed(&[b'~'; 5000]);
+        let done = o.feed(b"\x1b]133;D;1\x07");
+        assert_eq!(done.len(), 1, "vim's own D must still be reported");
+        assert_eq!(done[0].exit, Some(1));
     }
 
     #[test]
