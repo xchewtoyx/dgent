@@ -96,8 +96,8 @@ impl Config {
 
 fn default_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .filter(|p| p.is_absolute()) // XDG: a relative value is treated as unset
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("dgent/config.toml"))
 }

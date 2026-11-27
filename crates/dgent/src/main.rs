@@ -68,9 +68,12 @@ fn main() -> Result<()> {
     let mut turn: Option<Receiver<AgentEvent>> = None;
     let mut panel = String::new();
     // shortcut: claude/codex fall back to echo until W5/W6 add them to this match.
-    if cfg.backend != config::BackendKind::Echo {
-        panel = format!("[{:?} backend not built yet, using echo]", cfg.backend);
-    }
+    // Shown on the status line: the panel overlays the shell and would hide the prompt.
+    let fallback = if cfg.backend == config::BackendKind::Echo {
+        String::new()
+    } else {
+        format!(" [{:?} not built yet, using echo]", cfg.backend)
+    };
     let mut mode = Mode::Normal;
     let mut pane_size = (rows, cols);
 
@@ -152,7 +155,9 @@ fn main() -> Result<()> {
                 );
             }
             let line = match &mode {
-                Mode::Normal => Line::from(" dgent | C-] a: ask  C-] q: quit  C-] c: clear panel"),
+                Mode::Normal => Line::from(format!(
+                    " dgent | C-] a: ask  C-] q: quit  C-] c: clear panel{fallback}"
+                )),
                 Mode::Prefix => Line::from(" dgent | prefix: a ask, q quit, c clear, C-] literal"),
                 Mode::Ask(q) => Line::from(format!(" ask> {q}")),
             };
