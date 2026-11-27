@@ -89,11 +89,12 @@ impl Overseer {
     /// `C-] e`: explain the most recent failure, if there is one.
     pub fn explain_last(&self) -> Option<Request> {
         let f = self.last_failure.as_ref()?;
+        // The command goes in the prompt so a long output tail can't push it out of the budget.
         let prompt = format!(
-            "This command exited with status {}. Briefly explain why and suggest a fix.",
-            f.exit
+            "`{}` exited with status {}. Briefly explain why and suggest a fix. Its output follows.",
+            f.command, f.exit
         );
-        Some(self.build(&prompt, &format!("$ {}\n{}", f.command, f.output)))
+        Some(self.build(&prompt, &f.output))
     }
 
     /// The only place a `Request` is made: redact everything, then apply the budget.
@@ -107,16 +108,25 @@ impl Overseer {
 }
 
 /// Keep the last `max_lines` lines, then the last `max_bytes` bytes (the end is where errors are).
+/// A `[truncated]` marker line is added when bytes are cut, counted inside both limits.
 fn truncate(s: &str, max_lines: usize, max_bytes: usize) -> String {
+    const MARKER: &str = "[truncated]\n";
     let s = super::tail(s, max_lines);
     if s.len() <= max_bytes {
         return s;
     }
-    let mut start = s.len() - max_bytes;
+    // Leave room for the marker unless the budget is too small to hold it plus some text.
+    let marker = if max_bytes > MARKER.len() && max_lines > 1 {
+        MARKER
+    } else {
+        ""
+    };
+    let mut start = s.len() - (max_bytes - marker.len());
     while !s.is_char_boundary(start) {
         start += 1;
     }
-    format!("[truncated]\n{}", &s[start..])
+    let lines = max_lines - usize::from(!marker.is_empty());
+    format!("{marker}{}", super::tail(&s[start..], lines))
 }
 
 #[cfg(test)]
@@ -143,9 +153,16 @@ mod tests {
     fn budget_keeps_tail_lines_and_bytes() {
         let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
         assert_eq!(truncate(&text, 3, 1000), "line 97\nline 98\nline 99");
-        assert_eq!(truncate(&text, 3, 7), "[truncated]\nline 99");
+        assert_eq!(truncate(&text, 3, 19), "[truncated]\nline 99");
+        // Too small for the marker: plain suffix.
+        assert_eq!(truncate(&text, 3, 7), "line 99");
         // Never splits a multi-byte char.
-        assert_eq!(truncate("ééé", 10, 3), "[truncated]\né");
+        assert_eq!(truncate("ééé", 10, 3), "é");
+        // Marker counts against both limits even when every line survives the byte cut.
+        let wide: String = (0..40).map(|_| format!("{}\n", "x".repeat(205))).collect();
+        let t = truncate(&wide, 40, 8192);
+        assert!(t.starts_with("[truncated]\n"));
+        assert!(t.len() <= 8192 && t.lines().count() <= 40);
     }
 
     #[test]
@@ -193,7 +210,8 @@ mod tests {
             Reaction::Badge(b) if b.contains("exit 2")
         ));
         let req = o.explain_last().unwrap();
-        assert!(req.context.starts_with("$ make\noops"));
+        assert!(req.prompt.contains("`make` exited with status 2"));
+        assert_eq!(req.context, "oops");
     }
 
     #[test]
