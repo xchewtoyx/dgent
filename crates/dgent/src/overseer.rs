@@ -90,8 +90,8 @@ impl Overseer {
     pub fn explain_last(&self) -> Option<Request> {
         let f = self.last_failure.as_ref()?;
         // The command goes in the prompt so a long output tail can't push it out of the budget.
-        // Redact before capping, as in `build`; a pasted heredoc shouldn't blow the budget.
-        let command = truncate(&(self.redact)(&f.command), 5, 512);
+        // Redact before capping, as in `build`. Keep the head: the invocation matters most.
+        let command = head(&(self.redact)(&f.command), 5, 512);
         let prompt = format!(
             "`{command}` exited with status {}. Briefly explain why and suggest a fix. Its output follows.",
             f.exit
@@ -107,6 +107,20 @@ impl Overseer {
             context: truncate(&context, self.limits.max_lines, self.limits.max_bytes),
         }
     }
+}
+
+/// Keep the first `max_lines` lines and `max_bytes` bytes, ending in `…` if anything was cut.
+fn head(s: &str, max_lines: usize, max_bytes: usize) -> String {
+    let mut out = s.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    let mut end = out.len().min(max_bytes);
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.truncate(end);
+    if out.len() < s.trim_end().len() {
+        out.push('…');
+    }
+    out
 }
 
 /// Keep the last `max_lines` lines, then the last `max_bytes` bytes (the end is where errors are).
@@ -223,6 +237,16 @@ mod tests {
             Instant::now(),
         );
         assert!(o.explain_last().unwrap().prompt.len() < 1024);
+        // A long heredoc keeps its invocation and is marked as cut.
+        o.on_failure(
+            Failure {
+                command: format!("psql -f - <<EOF\n{}EOF", "select 1;\n".repeat(20)),
+                ..fail("")
+            },
+            Instant::now(),
+        );
+        let p = o.explain_last().unwrap().prompt;
+        assert!(p.contains("`psql -f - <<EOF\n") && p.contains("…`"));
     }
 
     #[test]
