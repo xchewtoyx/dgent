@@ -5,16 +5,17 @@
 //! literal Ctrl-].
 
 mod keys;
+mod pane;
 
-use std::io::{Read, Write};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
 use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use pane::Pane;
+use portable_pty::CommandBuilder;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -35,35 +36,10 @@ fn main() -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (cols, rows) = terminal::size()?;
 
-    let pty = native_pty_system()
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .context("open pty")?;
     let mut command = CommandBuilder::new(shell);
-    // Match what vt100 can render rather than inheriting the outer TERM. Not xterm-256color:
-    // it advertises `rep` (CSI b), which vt100 ignores. screen-256color is also on every remote host.
-    command.env("TERM", "screen-256color");
     command.cwd(std::env::current_dir().context("resolve launch directory")?);
-    let mut child = pty.slave.spawn_command(command).context("spawn shell")?;
-    drop(pty.slave);
-    let mut writer = pty.master.take_writer()?;
-    let mut reader = pty.master.try_clone_reader()?;
+    let mut pane = Pane::spawn(command, rows, cols)?;
 
-    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(64);
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        while let Ok(n @ 1..) = reader.read(&mut buf) {
-            if out_tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut parser = vt100::Parser::new(rows, cols, 10_000);
     let mut backend: Box<dyn Backend> = Box::new(EchoBackend);
     let mut turn: Option<Receiver<AgentEvent>> = None;
     let mut panel = String::new();
@@ -81,19 +57,10 @@ fn main() -> Result<()> {
 
     // Ok(code): the exit code dgent should return (0 on prefix-quit, the shell's otherwise).
     let result: Result<u32> = (|| loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = pane.try_wait()? {
             return Ok(status.exit_code());
         }
-        // Drain shell output, bounded so a flood (e.g. `yes`) can't starve key handling.
-        for _ in 0..64 {
-            match out_rx.try_recv() {
-                Ok(bytes) => parser.process(&bytes),
-                Err(mpsc::TryRecvError::Empty) => break,
-                // PTY EOF doesn't mean the shell exited (`exec cmd >/dev/null ...`): keep the UI
-                // live and let try_wait above report the exit.
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
+        pane.pump();
         if let Some(rx) = &turn {
             while let Ok(ev) = rx.try_recv() {
                 match ev {
@@ -108,33 +75,27 @@ fn main() -> Result<()> {
         }
 
         let area: Rect = term.size()?.into();
-        let [pane, status] =
+        let [pane_area, status] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        // The panel overlays the bottom of the pane rather than shrinking it: vt100 drops
-        // rows on a height decrease, so resizing for the panel would erase shell output.
+        // The panel overlays the bottom of the pane rather than shrinking it, so opening it
+        // doesn't resize the shell (and scroll its output) every time.
         let panel_h = if panel.is_empty() {
             0
         } else {
-            PANEL_HEIGHT.min(pane.height)
+            PANEL_HEIGHT.min(pane_area.height)
         };
         let side = Rect {
-            y: pane.bottom() - panel_h,
+            y: pane_area.bottom() - panel_h,
             height: panel_h,
-            ..pane
+            ..pane_area
         };
-        if (pane.height, pane.width) != pane_size {
-            pane_size = (pane.height, pane.width);
-            parser.screen_mut().set_size(pane.height, pane.width);
-            pty.master.resize(PtySize {
-                rows: pane.height,
-                cols: pane.width,
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
+        if (pane_area.height, pane_area.width) != pane_size {
+            pane_size = (pane_area.height, pane_area.width);
+            pane.resize(pane_area.height, pane_area.width)?;
         }
 
         term.draw(|f| {
-            f.render_widget(PseudoTerminal::new(parser.screen()), pane);
+            f.render_widget(PseudoTerminal::new(pane.screen()), pane_area);
             if panel_h > 0 {
                 let block = Block::default()
                     .borders(Borders::TOP)
@@ -169,10 +130,7 @@ fn main() -> Result<()> {
                 mode = match std::mem::replace(&mut mode, Mode::Normal) {
                     Mode::Normal if prefix => Mode::Prefix,
                     Mode::Normal => {
-                        pty_write(
-                            &mut writer,
-                            &keys::encode(key, parser.screen().application_cursor()),
-                        );
+                        pane.write(&keys::encode(key, pane.screen().application_cursor()));
                         Mode::Normal
                     }
                     Mode::Prefix => match key.code {
@@ -183,13 +141,13 @@ fn main() -> Result<()> {
                             Mode::Normal
                         }
                         _ if prefix => {
-                            pty_write(&mut writer, b"\x1d");
+                            pane.write(b"\x1d");
                             Mode::Normal
                         }
                         _ => Mode::Normal,
                     },
                     Mode::Ask(q) => ask_key(key, q, |prompt| {
-                        let context = tail(&parser.screen().contents(), CONTEXT_LINES);
+                        let context = tail(&pane.screen().contents(), CONTEXT_LINES);
                         panel = format!("> {prompt}\n");
                         match backend.ask(Request { prompt, context }) {
                             Ok(rx) => turn = Some(rx),
@@ -201,10 +159,10 @@ fn main() -> Result<()> {
             TermEvent::Paste(text) => {
                 if let Mode::Ask(q) = &mut mode {
                     q.push_str(&text);
-                } else if parser.screen().bracketed_paste() {
-                    pty_write(&mut writer, format!("\x1b[200~{text}\x1b[201~").as_bytes());
+                } else if pane.screen().bracketed_paste() {
+                    pane.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
                 } else {
-                    pty_write(&mut writer, text.as_bytes());
+                    pane.write(text.as_bytes());
                 }
             }
             _ => {}
@@ -217,7 +175,7 @@ fn main() -> Result<()> {
         terminal::LeaveAlternateScreen
     )?;
     terminal::disable_raw_mode()?;
-    let _ = child.kill();
+    pane.kill();
     match result? {
         0 => Ok(()),
         code => {
@@ -225,12 +183,6 @@ fn main() -> Result<()> {
             std::process::exit(code as i32)
         }
     }
-}
-
-/// Write to the shell. Errors are dropped: once the PTY closes nothing reads input,
-/// and shell exit is detected via `try_wait`, not write failures.
-fn pty_write(w: &mut impl Write, bytes: &[u8]) {
-    let _ = w.write_all(bytes);
 }
 
 /// Line editing for the ask prompt. Calls `submit` on Enter.
