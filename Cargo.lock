@@ -304,8 +304,10 @@ dependencies = [
  "anyhow",
  "crossterm",
  "dgent-backend",
+ "dgent-mcp",
  "portable-pty",
  "ratatui",
+ "serde_json",
  "tui-term",
  "vt100",
 ]
@@ -323,6 +325,15 @@ name = "dgent-redact"
 version = "0.1.0"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "dgent-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dgent-backend",
+ "serde_json",
 ]
 
 [[package]]

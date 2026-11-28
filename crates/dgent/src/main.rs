@@ -13,7 +13,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request};
+use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request, ToolReply};
+use dgent_mcp::{Listener, Tool};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -32,6 +33,10 @@ enum Mode {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        let sock = std::env::var_os(dgent_mcp::SOCK_ENV).map(std::path::PathBuf::from);
+        return dgent_mcp::serve(std::io::stdin().lock(), std::io::stdout(), sock.as_deref());
+    }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (cols, rows) = terminal::size()?;
 
@@ -64,6 +69,8 @@ fn main() -> Result<()> {
     });
 
     let mut parser = vt100::Parser::new(rows, cols, 10_000);
+    // Backends point `dgent mcp` at this via DGENT_SOCK when they spawn their agent.
+    let tools = Listener::bind(&dgent_mcp::socket_path())?;
     let mut backend: Box<dyn Backend> = Box::new(EchoBackend);
     let mut turn: Option<Receiver<AgentEvent>> = None;
     let mut panel = String::new();
@@ -105,6 +112,20 @@ fn main() -> Result<()> {
                     AgentEvent::Done => {}
                 }
             }
+        }
+
+        while let Ok(call) = tools.calls.try_recv() {
+            let reply = match &call.tool {
+                Tool::ReadScreen => ToolReply::Output(parser.screen().contents()),
+                // shortcut: no approval UI yet (W7), so deny rather than leave the agent hanging.
+                Tool::RunInPane(cmd) => {
+                    panel.push_str(&format!(
+                        "\n[proposed] {cmd} (denied: approval not wired yet)"
+                    ));
+                    ToolReply::Denied
+                }
+            };
+            let _ = call.reply(&reply);
         }
 
         let area: Rect = term.size()?.into();
@@ -221,7 +242,7 @@ fn main() -> Result<()> {
     match result? {
         0 => Ok(()),
         code => {
-            drop(term); // restores the cursor; process::exit skips destructors
+            drop((term, tools)); // restore the cursor, remove the socket: process::exit skips destructors
             std::process::exit(code as i32)
         }
     }

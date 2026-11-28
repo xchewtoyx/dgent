@@ -9,3 +9,4 @@ license = "MIT"
 [workspace.dependencies]
 anyhow = "1"
 dgent-backend = { path = "crates/dgent-backend" }
+dgent-mcp = { path = "crates/dgent-mcp" }
