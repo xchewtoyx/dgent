@@ -264,7 +264,10 @@ fn mcp_override(user: &[String], dgent_exe: Option<&Path>) -> String {
         .collect();
     if let Some(exe) = dgent_exe {
         let exe = q(&exe.to_string_lossy());
-        entries.push(format!("dgent={{command={exe},args=[\"mcp\"]}}"));
+        // Codex gives MCP servers a minimal env; forward the bridge socket explicitly.
+        entries.push(format!(
+            "dgent={{command={exe},args=[\"mcp\"],env_vars=[\"DGENT_SOCK\"]}}"
+        ));
     }
     format!("mcp_servers={{{}}}", entries.join(","))
 }
@@ -538,7 +541,7 @@ mod tests {
                 &["docs.v2".into(), "dgent".into()],
                 Some(Path::new("/bin/dgent"))
             ),
-            r#"mcp_servers={"docs.v2"={enabled=false},dgent={command="/bin/dgent",args=["mcp"]}}"#
+            r#"mcp_servers={"docs.v2"={enabled=false},dgent={command="/bin/dgent",args=["mcp"],env_vars=["DGENT_SOCK"]}}"#
         );
         assert_eq!(mcp_override(&[], None), "mcp_servers={}");
     }
