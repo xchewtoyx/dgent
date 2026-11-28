@@ -1,19 +1,21 @@
 //! Dgent: a terminal wrapper with an LLM overseer.
 //!
 //! Scaffold: one shell in a PTY, a status line, and an "ask" prompt wired to a
-//! [`Backend`]. Prefix key is Ctrl-]; then `a` asks, `q` quits, Ctrl-] sends a
-//! literal Ctrl-].
+//! [`Backend`]. Prefix key is Ctrl-]; then `a` asks, `i` adds command marks to the
+//! current shell, `q` quits, Ctrl-] sends a literal Ctrl-].
 
 mod keys;
+mod observe;
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
 use dgent_backend::{Backend, EchoBackend, Event as AgentEvent, Request};
+use observe::{CommandFinished, Observer};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -69,6 +71,11 @@ fn main() -> Result<()> {
     let mut panel = String::new();
     let mut mode = Mode::Normal;
     let mut pane_size = (rows, cols);
+    let mut observer = Observer::new();
+    let mut last_output = Instant::now();
+    let mut quiet = true;
+    // shortcut: only the latest command is kept, for the status badge; W8 consumes failures.
+    let mut last_cmd: Option<CommandFinished> = None;
 
     terminal::enable_raw_mode()?;
     execute!(
@@ -87,12 +94,21 @@ fn main() -> Result<()> {
         // Drain shell output, bounded so a flood (e.g. `yes`) can't starve key handling.
         for _ in 0..64 {
             match out_rx.try_recv() {
-                Ok(bytes) => parser.process(&bytes),
+                Ok(bytes) => {
+                    parser.process(&bytes);
+                    last_cmd = observer.feed(&bytes).pop().or(last_cmd);
+                    last_output = Instant::now();
+                    quiet = false;
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 // PTY EOF doesn't mean the shell exited (`exec cmd >/dev/null ...`): keep the UI
                 // live and let try_wait above report the exit.
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
+        }
+        if !quiet && last_output.elapsed() >= Duration::from_millis(50) {
+            quiet = true;
+            last_cmd = observer.idle().or(last_cmd);
         }
         if let Some(rx) = &turn {
             while let Ok(ev) = rx.try_recv() {
@@ -148,8 +164,13 @@ fn main() -> Result<()> {
                 );
             }
             let line = match &mode {
-                Mode::Normal => Line::from(" dgent | C-] a: ask  C-] q: quit  C-] c: clear panel"),
-                Mode::Prefix => Line::from(" dgent | prefix: a ask, q quit, c clear, C-] literal"),
+                Mode::Normal => Line::from(format!(
+                    " dgent | C-] a: ask  C-] q: quit  C-] c: clear panel{}",
+                    last_cmd.as_ref().map_or(String::new(), badge)
+                )),
+                Mode::Prefix => Line::from(
+                    " dgent | prefix: a ask, i add command marks, q quit, c clear, C-] literal",
+                ),
                 Mode::Ask(q) => Line::from(format!(" ask> {q}")),
             };
             f.render_widget(
@@ -178,6 +199,11 @@ fn main() -> Result<()> {
                     Mode::Prefix => match key.code {
                         KeyCode::Char('q') => return Ok(0),
                         KeyCode::Char('a') => Mode::Ask(String::new()),
+                        KeyCode::Char('i') => {
+                            observer.injected();
+                            pty_write(&mut writer, observe::INJECT.as_bytes());
+                            Mode::Normal
+                        }
                         KeyCode::Char('c') => {
                             panel.clear();
                             Mode::Normal
@@ -251,6 +277,15 @@ fn ask_key(key: KeyEvent, mut q: String, submit: impl FnOnce(String)) -> Mode {
             Mode::Ask(q)
         }
         _ => Mode::Ask(q),
+    }
+}
+
+/// Status-line hint for the last command, if it failed.
+fn badge(f: &CommandFinished) -> String {
+    match (f.failed(), f.exit) {
+        (false, _) => String::new(),
+        (true, Some(code)) => format!("  | \u{26a0} exit {code}: {}", f.cmd),
+        (true, None) => format!("  | \u{26a0} {}", f.error_hint.as_deref().unwrap_or("")),
     }
 }
 
