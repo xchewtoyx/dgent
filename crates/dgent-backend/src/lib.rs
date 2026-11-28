@@ -8,6 +8,8 @@
 //! captured output back with [`Backend::reply`].
 
 pub mod claude;
+mod codex;
+pub use codex::CodexBackend;
 
 use std::sync::mpsc::{self, Receiver};
 
